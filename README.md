@@ -10,3 +10,11 @@ Goals:
 
 This starts as a zsh wrapper plus a Dockerfile. More lifecycle commands will be
 added as the workflow settles.
+
+## First image
+
+Build locally:
+
+```sh
+docker build -t pi-agent-sandbox:base .
+```
