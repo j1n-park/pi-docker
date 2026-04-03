@@ -18,3 +18,6 @@ Build locally:
 ```sh
 docker build -t pi-agent-sandbox:base .
 ```
+
+Source `pi.zsh` and run `pi` from a project directory. The first pass just uses
+`docker run --rm`; state persistence still needs work.
