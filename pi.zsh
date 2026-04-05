@@ -3,7 +3,8 @@
 _pi_agent_config() {
   : "${PI_AGENT_DOCKER_DIR:=$HOME/.config/pi-agent-docker}"
   : "${PI_AGENT_BASE_IMAGE:=pi-agent-sandbox:base}"
-  : "${PI_AGENT_CURRENT_IMAGE:=pi-agent-sandbox:current}"
+  : "${PI_AGENT_IMAGE_REPO:=pi-agent-sandbox}"
+  : "${PI_AGENT_CURRENT_IMAGE:=${PI_AGENT_IMAGE_REPO}:current}"
 }
 
 _pi_agent_target_dir() {
@@ -31,6 +32,9 @@ _pi_agent_run() {
   local target container status
   target="$(_pi_agent_target_dir)" || return $?
   container="pi-agent-$RANDOM"
+  local snapshot
+  snapshot="${PI_AGENT_IMAGE_REPO}:snap-$(date +%Y%m%d-%H%M%S)"
+  docker tag "$PI_AGENT_CURRENT_IMAGE" "$snapshot" || return $?
   docker create -it --name "$container" \
     --workdir /workspace \
     --mount "type=bind,src=$target,dst=/workspace" \
@@ -38,7 +42,7 @@ _pi_agent_run() {
     /bin/bash -lc "$command" "$@" >/dev/null || return $?
   docker start --attach --interactive "$container"
   status=$?
-  docker commit "$container" "$PI_AGENT_CURRENT_IMAGE" >/dev/null
+  docker commit --change "LABEL pi.agent.previous_state=$snapshot" "$container" "$PI_AGENT_CURRENT_IMAGE" >/dev/null
   docker rm "$container" >/dev/null 2>&1 || true
   return $status
 }

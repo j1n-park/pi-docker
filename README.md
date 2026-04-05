@@ -24,3 +24,7 @@ Source `pi.zsh` and run `pi` from a project directory. The first pass just uses
 
 The wrapper now tags a `current` image and commits the container after each run,
 so the Pi install and package caches survive between sessions.
+
+Before every run, the wrapper makes a timestamped snapshot tag such as
+`pi-agent-sandbox:snap-20260405-160000`. Rollback commands are still manual for
+now.
