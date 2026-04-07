@@ -1,0 +1,8 @@
+services:
+  pi-agent:
+    image: pi-agent-sandbox:current
+    volumes:
+      - pi-agent-workspace:/workspace
+
+volumes:
+  pi-agent-workspace:
