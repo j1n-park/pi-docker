@@ -28,3 +28,6 @@ so the Pi install and package caches survive between sessions.
 Before every run, the wrapper makes a timestamped snapshot tag such as
 `pi-agent-sandbox:snap-20260405-160000`. Rollback commands are still manual for
 now.
+
+The project is mounted below `/workspace/<repo-name>` instead of directly at
+`/workspace`. That keeps resumed sessions scoped to the project path.

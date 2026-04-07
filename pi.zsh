@@ -35,9 +35,13 @@ _pi_agent_run() {
   local snapshot
   snapshot="${PI_AGENT_IMAGE_REPO}:snap-$(date +%Y%m%d-%H%M%S)"
   docker tag "$PI_AGENT_CURRENT_IMAGE" "$snapshot" || return $?
+  local target_name workspace
+  target_name="${target:t}"
+  [[ -z "$target_name" || "$target_name" == "/" ]] && target_name="workspace"
+  workspace="/workspace/$target_name"
   docker create -it --name "$container" \
-    --workdir /workspace \
-    --mount "type=bind,src=$target,dst=/workspace" \
+    --workdir "$workspace" \
+    --mount "type=bind,src=$target,dst=$workspace" \
     "$PI_AGENT_CURRENT_IMAGE" \
     /bin/bash -lc "$command" "$@" >/dev/null || return $?
   docker start --attach --interactive "$container"
