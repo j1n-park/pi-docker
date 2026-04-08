@@ -32,7 +32,5 @@ now.
 The project is mounted below `/workspace/<repo-name>` instead of directly at
 `/workspace`. That keeps resumed sessions scoped to the project path.
 
-## Workspace volume trial
-
-Trying a named volume as a scratch workspace so the container can keep files
-between runs without touching the host checkout.
+The workspace volume trial was dropped. Project changes need to remain in the
+host checkout; only tool and user state belongs in the image.
