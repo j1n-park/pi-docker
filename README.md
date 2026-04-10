@@ -34,3 +34,9 @@ The project is mounted below `/workspace/<repo-name>` instead of directly at
 
 The workspace volume trial was dropped. Project changes need to remain in the
 host checkout; only tool and user state belongs in the image.
+
+Added quick helper commands:
+
+- `pi-shell`
+- `pi-status`
+- `pi-snapshots`
