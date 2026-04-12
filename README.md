@@ -40,3 +40,6 @@ Added quick helper commands:
 - `pi-shell`
 - `pi-status`
 - `pi-snapshots`
+
+Reset and rollback commands can retag the current image without touching the
+base image. A small prune helper keeps old snapshots under control.

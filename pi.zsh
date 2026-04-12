@@ -62,3 +62,36 @@ pi-snapshots() {
   _pi_agent_config
   docker images "$PI_AGENT_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}' | grep ':snap-' | sort -r
 }
+
+
+pi-rollback() {
+  _pi_agent_config
+  local snapshot="$1"
+  [[ "$snapshot" != *:* ]] && snapshot="${PI_AGENT_IMAGE_REPO}:$snapshot"
+  docker tag "$snapshot" "$PI_AGENT_CURRENT_IMAGE"
+}
+
+pi-reset-system() {
+  _pi_agent_config
+  docker tag "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_CURRENT_IMAGE"
+}
+
+pi-reset-all() {
+  _pi_agent_config
+  local images
+  images=($(docker images "$PI_AGENT_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' | grep -E ':(current|snap-)'))
+  (( ${#images[@]} )) && docker rmi "${images[@]}"
+}
+
+pi-rebuild-base() {
+  _pi_agent_config
+  docker build -f "$PI_AGENT_DOCKER_DIR/Dockerfile" -t "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_DOCKER_DIR"
+}
+
+pi-prune() {
+  _pi_agent_config
+  local keep="${1:-10}"
+  local snapshots
+  snapshots=($(docker images "$PI_AGENT_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' | grep ':snap-' | sort -r))
+  (( ${#snapshots[@]} > keep )) && docker rmi "${snapshots[@]:$keep}"
+}
