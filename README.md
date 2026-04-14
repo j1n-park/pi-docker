@@ -43,3 +43,6 @@ Added quick helper commands:
 
 Reset and rollback commands can retag the current image without touching the
 base image. A small prune helper keeps old snapshots under control.
+
+The wrapper now clears common credential variables and refuses to start if the
+fixed active container name is already present.

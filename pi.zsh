@@ -1,3 +1,6 @@
+# Cleared env vars are passed as empty values to the container.
+typeset -ga _PI_AGENT_CLEARED_ENV=(GITHUB_TOKEN GH_TOKEN SSH_AUTH_SOCK AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS KUBECONFIG NPM_TOKEN)
+
 # Pi Agent Docker shell integration.
 
 _pi_agent_config() {
@@ -11,6 +14,7 @@ _pi_agent_config() {
 _pi_agent_info() { print -u2 -r -- "pi-agent-docker: $*"; }
 _pi_agent_target_dir() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
 _pi_agent_image_exists() { docker image inspect "$1" >/dev/null 2>&1; }
+_pi_agent_require_docker() { command -v docker >/dev/null 2>&1 || { print -u2 "pi-agent-docker: docker is not installed or not on PATH"; return 127; } }
 
 _pi_agent_ensure_current_image() {
   _pi_agent_config
@@ -30,15 +34,25 @@ _pi_agent_workspace() {
 _pi_agent_run() {
   local mode="$1"; shift
   _pi_agent_config
+  _pi_agent_require_docker || return $?
   _pi_agent_ensure_current_image || return $?
   local target workspace snapshot status
   target="$(_pi_agent_target_dir)" || return $?
   workspace="$(_pi_agent_workspace "$target")"
   snapshot="${PI_AGENT_IMAGE_REPO}:snap-$(date +%Y%m%d-%H%M%S)"
   docker tag "$PI_AGENT_CURRENT_IMAGE" "$snapshot" || return $?
+  if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
+    print -u2 "pi-agent-docker: active container already exists: $PI_AGENT_ACTIVE_CONTAINER"
+    return 75
+  fi
+  local -a env_args
+  env_args=()
+  local name
+  for name in "${_PI_AGENT_CLEARED_ENV[@]}"; do env_args+=(--env "$name="); done
   docker create -it --name "$PI_AGENT_ACTIVE_CONTAINER" \
     --workdir "$workspace" \
     --mount "type=bind,src=$target,dst=$workspace" \
+    "${env_args[@]}" \
     "$PI_AGENT_CURRENT_IMAGE" \
     /bin/bash -lc "$mode" "$@" >/dev/null || return $?
   docker start --attach --interactive "$PI_AGENT_ACTIVE_CONTAINER"
