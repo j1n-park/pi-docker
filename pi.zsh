@@ -62,7 +62,7 @@ _pi_agent_run() {
   return $status
 }
 
-pi() { _pi_agent_run 'exec pi "$@"' pi "$@"; }
+pi() { _pi_agent_run 'if ! command -v pi >/dev/null 2>&1; then installer="$(mktemp)"; curl -fsSL https://pi.dev/install.sh -o "$installer"; sh "$installer"; rm -f "$installer"; export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"; hash -r; fi; exec pi "$@"' pi "$@"; }
 pi-shell() { _pi_agent_run 'exec /bin/bash -i "$@"' pi-shell "$@"; }
 
 pi-status() {
