@@ -46,3 +46,7 @@ base image. A small prune helper keeps old snapshots under control.
 
 The wrapper now clears common credential variables and refuses to start if the
 fixed active container name is already present.
+
+## Install
+
+Run `./install.sh` and source the printed zsh file.
