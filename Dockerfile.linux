@@ -11,7 +11,12 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --gid "${AGENT_GID}" agent \
+RUN if getent group "${AGENT_GID}" >/dev/null; then \
+        group_name="$(getent group "${AGENT_GID}" | cut -d: -f1)"; \
+    else \
+        groupadd --gid "${AGENT_GID}" agent; \
+        group_name="agent"; \
+    fi \
     && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --shell /bin/bash agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/agent \
     && chmod 0440 /etc/sudoers.d/agent \
