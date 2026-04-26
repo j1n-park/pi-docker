@@ -50,3 +50,9 @@ fixed active container name is already present.
 ## Install
 
 Run `./install.sh` and source the printed zsh file.
+
+
+## CLI polish
+
+Wrapper flags are parsed before `--`; helper commands print their own help text.
+The final pass will normalize the command names and docs.
