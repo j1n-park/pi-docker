@@ -1,58 +1,9 @@
 # Pi Agent Docker
 
-A small experiment for running Pi Agent inside a local Docker sandbox.
+Run Pi Agent in Docker with a current image and timestamped snapshots.
 
-Goals:
+This wrapper keeps system and tool state in Docker images while leaving project
+changes in the host checkout through a bind mount. The Linux variant builds the
+container user with the host uid/gid so edited files have the right ownership.
 
-- keep Pi tools and caches out of the host project
-- mount the current project into the container
-- make it easy to reset the container environment when it gets messy
-
-This starts as a zsh wrapper plus a Dockerfile. More lifecycle commands will be
-added as the workflow settles.
-
-## First image
-
-Build locally:
-
-```sh
-docker build -t pi-agent-sandbox:base .
-```
-
-Source `pi.zsh` and run `pi` from a project directory. The first pass just uses
-`docker run --rm`; state persistence still needs work.
-
-The wrapper now tags a `current` image and commits the container after each run,
-so the Pi install and package caches survive between sessions.
-
-Before every run, the wrapper makes a timestamped snapshot tag such as
-`pi-agent-sandbox:snap-20260405-160000`. Rollback commands are still manual for
-now.
-
-The project is mounted below `/workspace/<repo-name>` instead of directly at
-`/workspace`. That keeps resumed sessions scoped to the project path.
-
-The workspace volume trial was dropped. Project changes need to remain in the
-host checkout; only tool and user state belongs in the image.
-
-Added quick helper commands:
-
-- `pi-shell`
-- `pi-status`
-- `pi-snapshots`
-
-Reset and rollback commands can retag the current image without touching the
-base image. A small prune helper keeps old snapshots under control.
-
-The wrapper now clears common credential variables and refuses to start if the
-fixed active container name is already present.
-
-## Install
-
-Run `./install.sh` and source the printed zsh file.
-
-
-## CLI polish
-
-Wrapper flags are parsed before `--`; helper commands print their own help text.
-The final pass will normalize the command names and docs.
+Install with `./install.sh`, then source either `pi.zsh` or `pi-linux.zsh`.
