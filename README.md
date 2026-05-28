@@ -11,6 +11,8 @@ This does not make projects reproducible. Project reproducibility belongs in
 the project repo through its own `Dockerfile`, scripts, `Makefile`, `mise`
 config, or other project-owned tooling.
 
+Related writing: [Pi Agent: Local and Contained](https://tjpark.dev/thoughts/pi-agent-local-contained/).
+
 ## State
 
 The Docker image stores container-local state:
