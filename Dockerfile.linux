@@ -27,13 +27,22 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN if getent group "${AGENT_GID}" >/dev/null; then \
-        group_name="$(getent group "${AGENT_GID}" | cut -d: -f1)"; \
-    else \
+RUN if ! getent group "${AGENT_GID}" >/dev/null; then \
         groupadd --gid "${AGENT_GID}" agent; \
-        group_name="agent"; \
     fi \
-    && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --shell /bin/bash agent \
+    && if getent passwd "${AGENT_UID}" >/dev/null; then \
+        existing_user="$(getent passwd "${AGENT_UID}" | cut -d: -f1)"; \
+        if [ "${existing_user}" != agent ]; then \
+            usermod --login agent "${existing_user}"; \
+        fi; \
+        usermod --gid "${AGENT_GID}" --shell /bin/bash agent; \
+        existing_home="$(getent passwd agent | cut -d: -f6)"; \
+        if [ "${existing_home}" != /home/agent ]; then \
+            usermod --home /home/agent --move-home agent; \
+        fi; \
+    else \
+        useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --shell /bin/bash agent; \
+    fi \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >/etc/sudoers.d/agent \
     && chmod 0440 /etc/sudoers.d/agent \
     && mkdir -p /workspace /home/agent/.local/bin /home/agent/.npm-global/bin \
