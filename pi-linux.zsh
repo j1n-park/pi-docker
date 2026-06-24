@@ -25,6 +25,7 @@ _pi_agent_config() {
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active-linux}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
+  : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
 }
 
 _pi_agent_ensure_base_image() {

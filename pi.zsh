@@ -26,6 +26,7 @@ _pi_agent_config() {
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
+  : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
 }
 
 _pi_agent_require_docker() {
@@ -88,6 +89,7 @@ Helper commands:
   pi-reset-all     Remove current image and snapshots.
   pi-rebuild-base  Rebuild the base image from the Dockerfile.
   pi-prune         Remove older snapshots.
+  pi-flatten       Flatten the current image to reset Docker layer depth.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -218,6 +220,21 @@ Arguments:
                  Defaults to PI_AGENT_SNAPSHOT_KEEP=$PI_AGENT_SNAPSHOT_KEEP.
 EOF
       ;;
+    pi-flatten)
+      cat <<EOF
+Usage: pi-flatten [-v|--verbose] [-h|--help]
+
+Flatten the current image to reset Docker layer depth while preserving
+container-local filesystem state.
+
+Options:
+  -v, --verbose  Print flatten details to stderr.
+  -h, --help     Show this help message.
+
+Image:
+  current: $PI_AGENT_CURRENT_IMAGE
+EOF
+      ;;
   esac
 }
 
@@ -303,21 +320,155 @@ _pi_agent_docker_env_args() {
   done
 }
 
+_pi_agent_import_change_args() {
+  local previous_state="${1:-}"
+  local committed_at="${2:-}"
+  local flattened_at="${3:-}"
+
+  print -r -- "--change"
+  print -r -- "ENV HOME=/home/agent"
+  print -r -- "--change"
+  print -r -- "ENV COLORTERM=truecolor"
+  print -r -- "--change"
+  print -r -- "ENV PATH=/home/agent/.local/bin:/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  print -r -- "--change"
+  print -r -- "WORKDIR /workspace"
+  print -r -- "--change"
+  print -r -- "USER agent"
+  print -r -- "--change"
+  print -r -- "CMD [\"/bin/bash\"]"
+  if [[ -n "$previous_state" ]]; then
+    print -r -- "--change"
+    print -r -- "LABEL pi.agent.previous_state=$previous_state"
+  fi
+  if [[ -n "$committed_at" ]]; then
+    print -r -- "--change"
+    print -r -- "LABEL pi.agent.committed_at=$committed_at"
+  fi
+  if [[ -n "$flattened_at" ]]; then
+    print -r -- "--change"
+    print -r -- "LABEL pi.agent.flattened_at=$flattened_at"
+  fi
+}
+
+_pi_agent_image_layer_count() {
+  docker image inspect "$1" --format '{{len .RootFS.Layers}}' 2>/dev/null
+}
+
+_pi_agent_clean_label_value() {
+  local value="${1:-}"
+  [[ "$value" == "<no value>" ]] && value=""
+  print -r -- "$value"
+}
+
+_pi_agent_flatten_container_to_current() {
+  _pi_agent_config
+  local container="$1"
+  local previous_state="${2:-}"
+  local committed_at="${3:-}"
+  local verbose="${4:-0}"
+  local flattened_at
+  local -a change_args pipe_status
+
+  flattened_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  change_args=("${(@f)$(_pi_agent_import_change_args "$previous_state" "$committed_at" "$flattened_at")}")
+
+  (( verbose )) && _pi_agent_info "flattening container filesystem into current image: $container -> $PI_AGENT_CURRENT_IMAGE"
+  docker export "$container" | docker import "${change_args[@]}" - "$PI_AGENT_CURRENT_IMAGE" >/dev/null
+  pipe_status=("${pipestatus[@]}")
+  if (( pipe_status[1] != 0 || pipe_status[2] != 0 )); then
+    print -u2 "pi-agent-docker: docker export/import failed while flattening $container"
+    return 1
+  fi
+  (( verbose )) && _pi_agent_info "flattened current image: $PI_AGENT_CURRENT_IMAGE"
+}
+
+_pi_agent_flatten_current_image() {
+  _pi_agent_config
+  local verbose="${1:-0}"
+  local temp_container previous_state committed_at flatten_status
+
+  previous_state="$(docker image inspect "$PI_AGENT_CURRENT_IMAGE" --format '{{index .Config.Labels "pi.agent.previous_state"}}' 2>/dev/null)" || previous_state=""
+  committed_at="$(docker image inspect "$PI_AGENT_CURRENT_IMAGE" --format '{{index .Config.Labels "pi.agent.committed_at"}}' 2>/dev/null)" || committed_at=""
+  previous_state="$(_pi_agent_clean_label_value "$previous_state")"
+  committed_at="$(_pi_agent_clean_label_value "$committed_at")"
+
+  temp_container="${PI_AGENT_ACTIVE_CONTAINER}-flatten-$$"
+  while docker container inspect "$temp_container" >/dev/null 2>&1; do
+    temp_container="${PI_AGENT_ACTIVE_CONTAINER}-flatten-${RANDOM}-$$"
+  done
+
+  (( verbose )) && _pi_agent_info "creating temporary flatten container: $temp_container"
+  docker create --name "$temp_container" "$PI_AGENT_CURRENT_IMAGE" /bin/true >/dev/null || return $?
+  _pi_agent_flatten_container_to_current "$temp_container" "$previous_state" "$committed_at" "$verbose"
+  flatten_status=$?
+  (( verbose )) && _pi_agent_info "removing temporary flatten container: $temp_container"
+  docker rm "$temp_container" >/dev/null 2>&1 || true
+  return $flatten_status
+}
+
+_pi_agent_maybe_flatten_current_image() {
+  _pi_agent_config
+  local verbose="${1:-0}"
+  local layer_count
+
+  if ! [[ "$PI_AGENT_FLATTEN_LAYER_THRESHOLD" == <-> ]]; then
+    print -u2 "pi-agent-docker: flatten layer threshold must be a non-negative integer"
+    return 2
+  fi
+  if (( PI_AGENT_FLATTEN_LAYER_THRESHOLD == 0 )); then
+    (( verbose )) && _pi_agent_info "automatic flattening disabled"
+    return 0
+  fi
+
+  layer_count="$(_pi_agent_image_layer_count "$PI_AGENT_CURRENT_IMAGE")" || return $?
+  if ! [[ "$layer_count" == <-> ]]; then
+    print -u2 "pi-agent-docker: could not determine layer count for $PI_AGENT_CURRENT_IMAGE"
+    return 1
+  fi
+
+  if (( layer_count >= PI_AGENT_FLATTEN_LAYER_THRESHOLD )); then
+    (( verbose )) && _pi_agent_info "current image has $layer_count layers; flattening at threshold $PI_AGENT_FLATTEN_LAYER_THRESHOLD"
+    _pi_agent_flatten_current_image "$verbose"
+  else
+    (( verbose )) && _pi_agent_info "current image has $layer_count layers; flatten threshold is $PI_AGENT_FLATTEN_LAYER_THRESHOLD"
+  fi
+}
+
 _pi_agent_commit_and_remove() {
   _pi_agent_config
   local container="$1"
   local snapshot="$2"
   local verbose="${3:-0}"
-  local committed_at
+  local committed_at err_file
 
   committed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! err_file="$(mktemp "${TMPDIR:-/tmp}/pi-agent-docker-commit.XXXXXX")"; then
+    print -u2 "pi-agent-docker: failed to create temporary commit error file"
+    docker rm "$container" >/dev/null 2>&1 || true
+    return 1
+  fi
   (( verbose )) && _pi_agent_info "committing container to current image: $container -> $PI_AGENT_CURRENT_IMAGE"
   docker commit \
     --change "LABEL pi.agent.previous_state=$snapshot" \
     --change "LABEL pi.agent.committed_at=$committed_at" \
     "$container" \
-    "$PI_AGENT_CURRENT_IMAGE" >/dev/null
+    "$PI_AGENT_CURRENT_IMAGE" >/dev/null 2>"$err_file"
   local commit_status=$?
+
+  if (( commit_status != 0 )); then
+    if grep -qi "max depth exceeded" "$err_file"; then
+      (( verbose )) && _pi_agent_info "docker commit hit max layer depth; flattening container instead"
+      _pi_agent_flatten_container_to_current "$container" "$snapshot" "$committed_at" "$verbose"
+      commit_status=$?
+      if (( commit_status != 0 )); then
+        cat "$err_file" >&2
+      fi
+    else
+      cat "$err_file" >&2
+    fi
+  fi
+  rm -f "$err_file"
 
   (( verbose )) && _pi_agent_info "removing temporary container: $container"
   docker rm "$container" >/dev/null 2>&1 || true
@@ -404,6 +555,7 @@ _pi_agent_run() {
     _pi_agent_report_run_failure "$PI_AGENT_ACTIVE_CONTAINER" 75
     return 75
   fi
+  _pi_agent_maybe_flatten_current_image "$verbose" || return $?
   snapshot="$(_pi_agent_create_snapshot "$verbose")" || return $?
 
   container="$PI_AGENT_ACTIVE_CONTAINER"
@@ -543,6 +695,7 @@ pi-status() {
   print -r -- "PI_AGENT_ACTIVE_CONTAINER=$PI_AGENT_ACTIVE_CONTAINER"
   print -r -- "PI_AGENT_SNAPSHOT_KEEP=$PI_AGENT_SNAPSHOT_KEEP"
   print -r -- "PI_AGENT_AUTO_PRUNE=$PI_AGENT_AUTO_PRUNE"
+  print -r -- "PI_AGENT_FLATTEN_LAYER_THRESHOLD=$PI_AGENT_FLATTEN_LAYER_THRESHOLD"
   print -r -- "host mount target=$target"
   print -r -- "container workspace=$container_workspace"
   print -r -- ""
@@ -553,8 +706,10 @@ pi-status() {
   docker image inspect "$PI_AGENT_CURRENT_IMAGE" \
     --format 'id={{.Id}}
 created={{.Created}}
+layers={{len .RootFS.Layers}}
 previous_state={{index .Config.Labels "pi.agent.previous_state"}}
-committed_at={{index .Config.Labels "pi.agent.committed_at"}}' 2>/dev/null \
+committed_at={{index .Config.Labels "pi.agent.committed_at"}}
+flattened_at={{index .Config.Labels "pi.agent.flattened_at"}}' 2>/dev/null \
     || print -r -- "current image is missing"
   print -r -- ""
   print -r -- "active container:"
@@ -682,4 +837,20 @@ pi-prune() {
   fi
   _pi_agent_require_docker || return $?
   _pi_agent_prune_snapshots "${_PI_AGENT_ARGS[1]:-$PI_AGENT_SNAPSHOT_KEEP}" "$_PI_AGENT_VERBOSE"
+}
+
+pi-flatten() {
+  _pi_agent_extract_verbose "$@"
+  if (( _PI_AGENT_HELP )); then
+    _pi_agent_usage pi-flatten
+    return 0
+  fi
+  _pi_agent_config
+  _pi_agent_require_docker || return $?
+  _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || return $?
+  if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
+    _pi_agent_report_run_failure "$PI_AGENT_ACTIVE_CONTAINER" 75
+    return 75
+  fi
+  _pi_agent_flatten_current_image "$_PI_AGENT_VERBOSE"
 }

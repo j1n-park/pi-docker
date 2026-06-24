@@ -35,6 +35,12 @@ pi-agent-sandbox:current
 pi-agent-sandbox:snap-YYYYMMDD-HHMMSS
 ```
 
+Each commit adds a Docker image layer. To avoid Docker's layer-depth limit, the
+wrapper automatically flattens the current image with `docker export` and
+`docker import` when it reaches `PI_AGENT_FLATTEN_LAYER_THRESHOLD`. Flattening
+preserves container-local filesystem state but does not include the bind-mounted
+project directory.
+
 The Linux variant uses the `pi-agent-sandbox-linux` image repo and passes your
 host UID/GID as Docker build args so bind-mounted files are owned by your host
 user.
@@ -164,6 +170,12 @@ Keep only the 10 newest snapshots:
 pi-prune 10
 ```
 
+Flatten the current image manually:
+
+```sh
+pi-flatten
+```
+
 By default, `PI_AGENT_AUTO_PRUNE=1` keeps the newest
 `PI_AGENT_SNAPSHOT_KEEP=10` snapshots after each run.
 
@@ -229,6 +241,7 @@ PI_AGENT_CURRENT_IMAGE="pi-agent-sandbox:current"
 PI_AGENT_ACTIVE_CONTAINER="pi-agent-active"
 PI_AGENT_SNAPSHOT_KEEP="10"
 PI_AGENT_AUTO_PRUNE="1"
+PI_AGENT_FLATTEN_LAYER_THRESHOLD="100"
 ```
 
 Linux defaults:
@@ -241,6 +254,7 @@ PI_AGENT_IMAGE_REPO="pi-agent-sandbox-linux"
 PI_AGENT_BASE_IMAGE="pi-agent-sandbox-linux:base"
 PI_AGENT_CURRENT_IMAGE="pi-agent-sandbox-linux:current"
 PI_AGENT_ACTIVE_CONTAINER="pi-agent-active-linux"
+PI_AGENT_FLATTEN_LAYER_THRESHOLD="100"
 ```
 
 If your Linux UID/GID changes, rebuild the base image and reset current state so
