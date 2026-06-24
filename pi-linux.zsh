@@ -68,6 +68,35 @@ _pi_agent_snapshot_example() {
   print -r -- "${PI_AGENT_IMAGE_REPO}:snap-YYYYMMDD-HHMMSS"
 }
 
+_pi_agent_maybe_flatten_current_image() {
+  _pi_agent_config
+  local verbose="${1:-0}"
+  local layer_count
+
+  if ! [[ "$PI_AGENT_FLATTEN_LAYER_THRESHOLD" == <-> ]]; then
+    print -u2 "pi-agent-docker: flatten layer threshold must be a non-negative integer"
+    return 2
+  fi
+  if (( PI_AGENT_FLATTEN_LAYER_THRESHOLD == 0 )); then
+    (( verbose )) && _pi_agent_info "automatic flattening disabled"
+    return 0
+  fi
+
+  layer_count="$(_pi_agent_image_layer_count "$PI_AGENT_CURRENT_IMAGE")" || return $?
+  if ! [[ "$layer_count" == <-> ]]; then
+    print -u2 "pi-agent-docker: could not determine layer count for $PI_AGENT_CURRENT_IMAGE"
+    return 1
+  fi
+
+  if (( layer_count >= PI_AGENT_FLATTEN_LAYER_THRESHOLD )); then
+    (( verbose )) && _pi_agent_info "current image has $layer_count layers; flattening at threshold $PI_AGENT_FLATTEN_LAYER_THRESHOLD"
+    _pi_agent_flatten_current_image "$verbose"
+  else
+    (( verbose )) && _pi_agent_info "current image has $layer_count layers; flatten threshold is $PI_AGENT_FLATTEN_LAYER_THRESHOLD"
+    return 0
+  fi
+}
+
 pi-rebuild-base() {
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
