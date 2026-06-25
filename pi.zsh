@@ -579,9 +579,6 @@ _pi_agent_run() {
       "$PI_AGENT_CURRENT_IMAGE" \
       /bin/bash -lc '
         set -e
-        git config --global user.name "Jin Park via Agent"
-        git config --global user.email "sharpsim93+agent@gmail.com"
-        git config --global commit.gpgsign false
         exec /bin/bash -i "$@"
       ' pi-shell "$@" >/dev/null
     local create_status=$?
@@ -603,9 +600,6 @@ _pi_agent_run() {
       "$PI_AGENT_CURRENT_IMAGE" \
       /bin/bash -lc '
         set -e
-        git config --global user.name "Jin Park via Agent"
-        git config --global user.email "sharpsim93+agent@gmail.com"
-        git config --global commit.gpgsign false
         if ! command -v pi >/dev/null 2>&1; then
           installer="$(mktemp)"
           curl -fsSL https://pi.dev/install.sh -o "$installer"
