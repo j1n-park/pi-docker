@@ -381,6 +381,7 @@ _pi_agent_flatten_container_to_current() {
     return 1
   fi
   (( verbose )) && _pi_agent_info "flattened current image: $PI_AGENT_CURRENT_IMAGE"
+  return 0
 }
 
 _pi_agent_flatten_current_image() {
@@ -432,6 +433,7 @@ _pi_agent_maybe_flatten_current_image() {
     _pi_agent_flatten_current_image "$verbose"
   else
     (( verbose )) && _pi_agent_info "current image has $layer_count layers; flatten threshold is $PI_AGENT_FLATTEN_LAYER_THRESHOLD"
+    return 0
   fi
 }
 
@@ -764,6 +766,7 @@ pi-rollback() {
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rolling back current image to snapshot: $snapshot"
   docker tag "$snapshot" "$PI_AGENT_CURRENT_IMAGE"
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image now points to: $snapshot"
+  return 0
 }
 
 pi-reset-system() {
@@ -778,6 +781,7 @@ pi-reset-system() {
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "resetting current image to base: $PI_AGENT_BASE_IMAGE -> $PI_AGENT_CURRENT_IMAGE"
   docker tag "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_CURRENT_IMAGE"
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image reset to base"
+  return 0
 }
 
 pi-reset-all() {
