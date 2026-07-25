@@ -109,7 +109,7 @@ Open an interactive shell in the shared snapshot-backed Docker environment.
 Options:
   -v, --verbose  Print wrapper progress information to stderr.
   -h, --help     Show this help message.
-  --             Stop parsing wrapper flags and pass remaining args to bash.
+  --             Stop parsing wrapper flags and pass remaining args to zsh.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -484,7 +484,7 @@ _pi_agent_import_change_args() {
   print -r -- "--change"
   print -r -- "USER agent"
   print -r -- "--change"
-  print -r -- "CMD [\"/bin/bash\"]"
+  print -r -- "CMD [\"/bin/zsh\"]"
   if [[ -n "$previous_state" ]]; then
     print -r -- "--change"
     print -r -- "LABEL pi.agent.previous_state=$previous_state"
@@ -709,7 +709,7 @@ _pi_agent_exec_session() {
 
       case "$mode" in
         shell)
-          /bin/bash -i "$@"
+          /bin/zsh -i "$@"
           ;;
         pi)
           if ! command -v pi >/dev/null 2>&1; then

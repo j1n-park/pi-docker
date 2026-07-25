@@ -116,7 +116,8 @@ pi -- --help
 
 Wrapper flags such as `--help` and `--verbose` are parsed before `--`.
 
-Open a shell in the same environment:
+Open a Zsh shell in the same environment. The image includes Zap with its
+default `~/.zshrc`:
 
 ```sh
 pi-shell
