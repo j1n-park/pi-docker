@@ -252,10 +252,15 @@ PI_AGENT_CURRENT_IMAGE="pi-agent-sandbox:current"
 PI_AGENT_ACTIVE_CONTAINER="pi-agent-active"
 PI_AGENT_WORKSPACE_ROOT="$HOME/workspace"
 PI_AGENT_STATE_DIR="$PI_AGENT_DOCKER_DIR/.state/$PI_AGENT_IMAGE_REPO"
+PI_AGENT_LOCK_TIMEOUT="30"
 PI_AGENT_SNAPSHOT_KEEP="10"
 PI_AGENT_AUTO_PRUNE="1"
 PI_AGENT_FLATTEN_LAYER_THRESHOLD="100"
 ```
+
+`PI_AGENT_STATE_DIR` must be an absolute path and must not contain backslashes.
+The installer applies the same rule to its install directory, preventing an
+accidental `\\` input from creating a relative directory.
 
 Linux defaults:
 

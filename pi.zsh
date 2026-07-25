@@ -26,6 +26,7 @@ _pi_agent_config() {
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active}"
   : "${PI_AGENT_WORKSPACE_ROOT:=$HOME/workspace}"
   : "${PI_AGENT_STATE_DIR:=${PI_AGENT_DOCKER_DIR}/.state/${PI_AGENT_IMAGE_REPO}}"
+  : "${PI_AGENT_LOCK_TIMEOUT:=30}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
   : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
@@ -250,18 +251,35 @@ _pi_agent_target_dir() {
 
 _pi_agent_prepare_state_dir() {
   _pi_agent_config
+  _pi_agent_validate_state_dir || return $?
   mkdir -p "$PI_AGENT_STATE_DIR/sessions" || return $?
+}
+
+_pi_agent_validate_state_dir() {
+  local state_dir="$PI_AGENT_STATE_DIR"
+  if [[ -z "$state_dir" || "$state_dir" != /* || "$state_dir" == *'\\'* ]]; then
+    print -u2 "pi-agent-docker: PI_AGENT_STATE_DIR must be an absolute path without backslashes: ${state_dir:-<empty>}"
+    return 2
+  fi
 }
 
 _pi_agent_lock() {
   _pi_agent_prepare_state_dir || return $?
-  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
+  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock" timeout="$PI_AGENT_LOCK_TIMEOUT"
+  if ! [[ "$timeout" == <-> ]]; then
+    print -u2 "pi-agent-docker: PI_AGENT_LOCK_TIMEOUT must be a non-negative integer"
+    return 2
+  fi
   zmodload zsh/system || {
     print -u2 "pi-agent-docker: could not load zsh/system for lifecycle locking"
     return 1
   }
   [[ -e "$lock" ]] || : >"$lock"
-  zsystem flock -f _PI_AGENT_LOCK_FD "$lock"
+  if ! zsystem flock -t "$timeout" -f _PI_AGENT_LOCK_FD "$lock"; then
+    print -u2 "pi-agent-docker: timed out after ${timeout}s waiting for lifecycle lock"
+    print -u2 "pi-agent-docker: another lifecycle operation is still running; retry after it finishes"
+    return 75
+  fi
 }
 
 _pi_agent_unlock() {
@@ -272,7 +290,12 @@ _pi_agent_unlock() {
 }
 
 _pi_agent_session_count() {
-  _pi_agent_prepare_state_dir || return $?
+  _pi_agent_config
+  _pi_agent_validate_state_dir || return $?
+  [[ -d "$PI_AGENT_STATE_DIR/sessions" ]] || {
+    print -r -- 0
+    return 0
+  }
   local -a sessions
   sessions=("$PI_AGENT_STATE_DIR"/sessions/*(N))
   print -r -- "${#sessions[@]}"
@@ -597,12 +620,10 @@ _pi_agent_commit_and_remove() {
   fi
   rm -f "$err_file"
 
-  # The shared container stays alive with `sleep infinity` while sessions run.
-  # Once the final session has been committed, stop it before removing it.
-  (( verbose )) && _pi_agent_info "stopping shared container: $container"
-  docker stop "$container" >/dev/null 2>&1 || true
+  # State is already committed.  Force removal avoids Docker's graceful-stop
+  # timeout for the `sleep infinity` container.
   (( verbose )) && _pi_agent_info "removing shared container: $container"
-  docker rm "$container" >/dev/null 2>&1 || true
+  docker rm -f "$container" >/dev/null 2>&1 || true
   return $commit_status
 }
 
@@ -713,6 +734,9 @@ _pi_agent_run() {
   _pi_agent_config
   _pi_agent_require_docker || return $?
 
+  # Keep the lock descriptor scoped to one invocation.  This is deliberately
+  # local even though zsystem writes it by parameter name.
+  local _PI_AGENT_LOCK_FD
   local mode="$1"
   local verbose="${2:-0}"
   shift 2
@@ -759,7 +783,9 @@ _pi_agent_run() {
   session_file="$(mktemp "$PI_AGENT_STATE_DIR/sessions/session.XXXXXX")" || { _pi_agent_unlock; return $?; }
   session_id="${session_file:t}"
   local launcher_pid launcher_started
-  launcher_pid="$(sh -c 'printf "%s" "$PPID"')"
+  # This is the shell running _pi_agent_run, not a command-substitution child
+  # that exits before another session can validate this reservation.
+  launcher_pid="${ZSH_PID:-$$}"
   launcher_started="$(_pi_agent_process_started_at "$launcher_pid")"
   print -r -- "pending $launcher_pid $launcher_started" >"$session_file"
   _pi_agent_unlock
@@ -850,6 +876,7 @@ pi-status() {
   print -r -- "PI_AGENT_ACTIVE_CONTAINER=$PI_AGENT_ACTIVE_CONTAINER"
   print -r -- "PI_AGENT_WORKSPACE_ROOT=$PI_AGENT_WORKSPACE_ROOT"
   print -r -- "PI_AGENT_STATE_DIR=$PI_AGENT_STATE_DIR"
+  print -r -- "PI_AGENT_LOCK_TIMEOUT=$PI_AGENT_LOCK_TIMEOUT"
   print -r -- "PI_AGENT_SNAPSHOT_KEEP=$PI_AGENT_SNAPSHOT_KEEP"
   print -r -- "PI_AGENT_AUTO_PRUNE=$PI_AGENT_AUTO_PRUNE"
   print -r -- "PI_AGENT_FLATTEN_LAYER_THRESHOLD=$PI_AGENT_FLATTEN_LAYER_THRESHOLD"
@@ -905,6 +932,7 @@ pi-rollback() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
@@ -945,6 +973,7 @@ pi-reset-system() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
@@ -968,6 +997,7 @@ pi-reset-all() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
@@ -1007,6 +1037,7 @@ pi-rebuild-base() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
 
   if [[ ! -f "$PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE" ]]; then
     print -u2 "pi-agent-docker: missing Dockerfile at $PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE"
@@ -1031,6 +1062,7 @@ pi-prune() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
@@ -1049,6 +1081,7 @@ pi-flatten() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || { local status=$?; _pi_agent_unlock; return $status; }

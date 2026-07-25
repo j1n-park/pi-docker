@@ -63,6 +63,24 @@ expand_path() {
   esac
 }
 
+validate_install_dir() {
+  case "$1" in
+    /*)
+      ;;
+    *)
+      echo "install.sh: install directory must be an absolute path" >&2
+      return 1
+      ;;
+  esac
+
+  case "$1" in
+    ''|*'\\'*)
+      echo "install.sh: install directory must not contain backslashes" >&2
+      return 1
+      ;;
+  esac
+}
+
 append_source_line() {
   config_file="$1"
 
@@ -118,6 +136,7 @@ if [ -z "$install_dir" ]; then
   install_dir="$install_dir_default"
 fi
 install_dir=$(expand_path "$install_dir")
+validate_install_dir "$install_dir" || exit $?
 
 if [ "$variant" = "linux" ]; then
   source_file="pi-linux.zsh"
