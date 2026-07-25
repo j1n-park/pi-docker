@@ -24,6 +24,8 @@ _pi_agent_config() {
   : "${PI_AGENT_BASE_IMAGE:=${PI_AGENT_IMAGE_REPO}:base}"
   : "${PI_AGENT_CURRENT_IMAGE:=${PI_AGENT_IMAGE_REPO}:current}"
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active}"
+  : "${PI_AGENT_WORKSPACE_ROOT:=$HOME/workspace}"
+  : "${PI_AGENT_STATE_DIR:=${PI_AGENT_DOCKER_DIR}/.state/${PI_AGENT_IMAGE_REPO}}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
   : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
@@ -94,13 +96,14 @@ Helper commands:
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
   snapshot repo: $PI_AGENT_IMAGE_REPO
+  workspace root: $PI_AGENT_WORKSPACE_ROOT
 EOF
       ;;
     pi-shell)
       cat <<EOF
 Usage: pi-shell [-v|--verbose] [-h|--help] [--] [args...]
 
-Open an interactive shell in the same snapshot-backed Docker environment.
+Open an interactive shell in the shared snapshot-backed Docker environment.
 
 Options:
   -v, --verbose  Print wrapper progress information to stderr.
@@ -110,6 +113,7 @@ Options:
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
   active container: $PI_AGENT_ACTIVE_CONTAINER
+  workspace root: $PI_AGENT_WORKSPACE_ROOT
 EOF
       ;;
     pi-status)
@@ -242,6 +246,127 @@ _pi_agent_target_dir() {
   local root
   root="$(git rev-parse --show-toplevel 2>/dev/null)" && print -r -- "$root" && return 0
   pwd
+}
+
+_pi_agent_prepare_state_dir() {
+  _pi_agent_config
+  mkdir -p "$PI_AGENT_STATE_DIR/sessions" || return $?
+}
+
+_pi_agent_lock() {
+  _pi_agent_prepare_state_dir || return $?
+  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
+  zmodload zsh/system || {
+    print -u2 "pi-agent-docker: could not load zsh/system for lifecycle locking"
+    return 1
+  }
+  [[ -e "$lock" ]] || : >"$lock"
+  zsystem flock -f _PI_AGENT_LOCK_FD "$lock"
+}
+
+_pi_agent_unlock() {
+  if [[ -n "${_PI_AGENT_LOCK_FD:-}" ]]; then
+    zsystem flock -u "$_PI_AGENT_LOCK_FD" 2>/dev/null || true
+    unset _PI_AGENT_LOCK_FD
+  fi
+}
+
+_pi_agent_session_count() {
+  _pi_agent_prepare_state_dir || return $?
+  local -a sessions
+  sessions=("$PI_AGENT_STATE_DIR"/sessions/*(N))
+  print -r -- "${#sessions[@]}"
+}
+
+_pi_agent_process_started_at() {
+  local pid="$1"
+  ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}'
+}
+
+_pi_agent_reap_sessions() {
+  _pi_agent_config
+  local container="$PI_AGENT_ACTIVE_CONTAINER" session_file session_id launcher_pid launcher_started current_started marker_state query_status
+  local -a sessions
+  sessions=("$PI_AGENT_STATE_DIR"/sessions/*(N))
+  if ! docker container inspect "$container" >/dev/null 2>&1; then
+    rm -f "${sessions[@]}"
+    return 0
+  fi
+  for session_file in "${sessions[@]}"; do
+    session_id="${session_file:t}"
+    launcher_pid="$(awk 'NR == 1 { print $2 }' "$session_file" 2>/dev/null)"
+    launcher_started="$(awk 'NR == 1 { $1=$2=""; sub(/^  */, ""); print }' "$session_file" 2>/dev/null)"
+    marker_state="$(docker exec "$container" /bin/sh -c '
+      session_file="/tmp/pi-agent-sessions/$1"
+      if [ ! -r "$session_file" ]; then
+        printf absent
+        exit 0
+      fi
+      read -r pid started <"$session_file"
+      current="$(awk '\''{ print $22 }'\'' "/proc/$pid/stat" 2>/dev/null)"
+      if [ -n "$pid" ] && [ -n "$started" ] && [ "$current" = "$started" ]; then
+        printf alive
+      else
+        printf dead
+      fi
+    ' sh "$session_id")"
+    query_status=$?
+    if (( query_status != 0 )); then
+      print -u2 "pi-agent-docker: could not verify active session: $session_id"
+      return 1
+    fi
+    case "$marker_state" in
+      alive)
+        ;;
+      absent|dead)
+        # A live launcher protects the tiny interval between host registration
+        # and the session wrapper writing its container-side marker.
+        current_started="$(_pi_agent_process_started_at "$launcher_pid")"
+        if [[ "$launcher_pid" == <-> && -n "$launcher_started" && "$current_started" == "$launcher_started" ]]; then
+          continue
+        fi
+        rm -f "$session_file"
+        ;;
+      *)
+        print -u2 "pi-agent-docker: invalid active session marker: $session_id"
+        return 1
+        ;;
+    esac
+  done
+}
+
+_pi_agent_workspace_for_target() {
+  _pi_agent_config
+  local target="$1" root relative
+  root="$(cd -P "$PI_AGENT_WORKSPACE_ROOT" 2>/dev/null && pwd)" || {
+    print -u2 "pi-agent-docker: workspace root does not exist: $PI_AGENT_WORKSPACE_ROOT"
+    return 1
+  }
+  target="$(cd -P "$target" 2>/dev/null && pwd)" || return $?
+  if [[ "$target" == "$root" ]]; then
+    print -r -- "/workspace"
+    return 0
+  fi
+  if [[ "$target" != "$root"/* ]]; then
+    print -u2 "pi-agent-docker: project is outside PI_AGENT_WORKSPACE_ROOT: $target"
+    print -u2 "pi-agent-docker: set PI_AGENT_WORKSPACE_ROOT to a directory containing this project"
+    return 1
+  fi
+  relative="${target#$root/}"
+  print -r -- "/workspace/$relative"
+}
+
+_pi_agent_container_running() {
+  [[ "$(docker container inspect --format '{{.State.Running}}' "$PI_AGENT_ACTIVE_CONTAINER" 2>/dev/null)" == "true" ]]
+}
+
+_pi_agent_refuse_while_active() {
+  _pi_agent_config
+  if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
+    print -u2 "pi-agent-docker: shared container is active: $PI_AGENT_ACTIVE_CONTAINER"
+    print -u2 "pi-agent-docker: wait for all pi sessions to exit first"
+    return 75
+  fi
 }
 
 _pi_agent_image_exists() {
@@ -472,7 +597,11 @@ _pi_agent_commit_and_remove() {
   fi
   rm -f "$err_file"
 
-  (( verbose )) && _pi_agent_info "removing temporary container: $container"
+  # The shared container stays alive with `sleep infinity` while sessions run.
+  # Once the final session has been committed, stop it before removing it.
+  (( verbose )) && _pi_agent_info "stopping shared container: $container"
+  docker stop "$container" >/dev/null 2>&1 || true
+  (( verbose )) && _pi_agent_info "removing shared container: $container"
   docker rm "$container" >/dev/null 2>&1 || true
   return $commit_status
 }
@@ -529,6 +658,57 @@ _pi_agent_prune_snapshots() {
   fi
 }
 
+# Run one interactive command inside the shared container. The wrapper below
+# deliberately leaves lifecycle work outside this function so Pi sessions can
+# run in parallel.
+_pi_agent_exec_session() {
+  local mode="$1" workspace="$2" session_id="$3" verbose="$4"
+  shift 4
+  local -a tty_args
+  tty_args=(--interactive)
+  [[ -t 0 && -t 1 ]] && tty_args+=(--tty)
+
+  (( verbose )) && _pi_agent_info "opening $mode session in shared container"
+  docker exec \
+    "${tty_args[@]}" \
+    --workdir "$workspace" \
+    --env "TERM=${TERM:-xterm-256color}" \
+    --env "PI_AGENT_SESSION_ID=$session_id" \
+    "$PI_AGENT_ACTIVE_CONTAINER" \
+    /bin/bash -lc '
+      set -e
+      mode="$1"
+      shift
+
+      session_file="/tmp/pi-agent-sessions/$PI_AGENT_SESSION_ID"
+      mkdir -p /tmp/pi-agent-sessions
+      started="$(awk '\''{ print $22 }'\'' "/proc/$$/stat")"
+      printf "%s %s\n" "$$" "$started" >"$session_file"
+      trap '\''rm -f "$session_file"'\'' EXIT HUP INT TERM
+
+      case "$mode" in
+        shell)
+          /bin/bash -i "$@"
+          ;;
+        pi)
+          if ! command -v pi >/dev/null 2>&1; then
+            installer="$(mktemp)"
+            curl -fsSL https://pi.dev/install.sh -o "$installer"
+            if [ -r /dev/tty ]; then sh "$installer" </dev/tty; else sh "$installer"; fi
+            rm -f "$installer"
+            export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+            hash -r
+          fi
+          pi "$@"
+          ;;
+        *)
+          echo "pi-agent-docker: unknown session mode: $mode" >&2
+          exit 2
+          ;;
+      esac
+    ' pi-session "$mode" "$@"
+}
+
 _pi_agent_run() {
   _pi_agent_config
   _pi_agent_require_docker || return $?
@@ -536,102 +716,85 @@ _pi_agent_run() {
   local mode="$1"
   local verbose="${2:-0}"
   shift 2
-
-  local target target_name container_workspace snapshot container run_status commit_status
-  local -a tty_args env_args
+  local target container_workspace container session_file session_id run_status commit_status snapshot
+  local -a env_args
 
   target="$(_pi_agent_target_dir)" || return $?
-  target_name="${target:t}"
-  if [[ -z "$target_name" || "$target_name" == "/" ]]; then
-    target_name="workspace"
-  fi
-  container_workspace="/workspace/$target_name"
+  container_workspace="$(_pi_agent_workspace_for_target "$target")" || return $?
+  container="$PI_AGENT_ACTIVE_CONTAINER"
 
   (( verbose )) && _pi_agent_info "mode: $mode"
   (( verbose )) && _pi_agent_info "host mount target: $target"
   (( verbose )) && _pi_agent_info "container workspace: $container_workspace"
   (( verbose )) && _pi_agent_info "active container name: $PI_AGENT_ACTIVE_CONTAINER"
 
-  _pi_agent_ensure_current_image "$verbose" || return $?
-  if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
-    _pi_agent_report_run_failure "$PI_AGENT_ACTIVE_CONTAINER" 75
+  # Phase 1: serialize container startup and reserve a session marker.
+  # The marker is written before releasing the lock so the last exiting peer
+  # cannot commit the container while this session is still starting.
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; exit 130' HUP INT TERM
+  _pi_agent_ensure_current_image "$verbose" || { _pi_agent_unlock; return $?; }
+  if docker container inspect "$container" >/dev/null 2>&1 && ! _pi_agent_container_running; then
+    print -u2 "pi-agent-docker: shared container is not running: $container"
+    print -u2 "pi-agent-docker: remove it after inspecting it: docker rm $container"
+    _pi_agent_unlock
     return 75
   fi
-  _pi_agent_maybe_flatten_current_image "$verbose" || return $?
-  snapshot="$(_pi_agent_create_snapshot "$verbose")" || return $?
-
-  container="$PI_AGENT_ACTIVE_CONTAINER"
-  tty_args=(--interactive)
-  if [[ -t 0 && -t 1 ]]; then
-    tty_args+=(--tty)
-  fi
-  env_args=("${(@f)$(_pi_agent_docker_env_args)}")
-
-  if [[ "$mode" == "shell" ]]; then
-    (( verbose )) && _pi_agent_info "creating shell container from image: $PI_AGENT_CURRENT_IMAGE"
-    docker create \
-      "${tty_args[@]}" \
+  if ! docker container inspect "$container" >/dev/null 2>&1; then
+    # Without a container, session markers can only be leftovers from an
+    # interrupted earlier generation.
+    rm -f "$PI_AGENT_STATE_DIR"/sessions/*(N)
+    _pi_agent_maybe_flatten_current_image "$verbose" || { _pi_agent_unlock; return $?; }
+    (( verbose )) && _pi_agent_info "starting shared container from image: $PI_AGENT_CURRENT_IMAGE"
+    env_args=("${(@f)$(_pi_agent_docker_env_args)}")
+    docker run --detach \
       --name "$container" \
-      --workdir "$container_workspace" \
-      --mount "type=bind,src=$target,dst=$container_workspace" \
-      --env "TERM=${TERM:-xterm-256color}" \
+      --mount "type=bind,src=$PI_AGENT_WORKSPACE_ROOT,dst=/workspace" \
       "${env_args[@]}" \
       "$PI_AGENT_CURRENT_IMAGE" \
-      /bin/bash -lc '
-        set -e
-        exec /bin/bash -i "$@"
-      ' pi-shell "$@" >/dev/null
-    local create_status=$?
-    if (( create_status != 0 )); then
-      _pi_agent_report_run_failure "$container" "$create_status"
-      return $create_status
-    fi
-    (( verbose )) && _pi_agent_info "starting shell container: $container"
-    docker start --attach --interactive "$container"
-  else
-    (( verbose )) && _pi_agent_info "creating pi container from image: $PI_AGENT_CURRENT_IMAGE"
-    docker create \
-      "${tty_args[@]}" \
-      --name "$container" \
-      --workdir "$container_workspace" \
-      --mount "type=bind,src=$target,dst=$container_workspace" \
-      --env "TERM=${TERM:-xterm-256color}" \
-      "${env_args[@]}" \
-      "$PI_AGENT_CURRENT_IMAGE" \
-      /bin/bash -lc '
-        set -e
-        if ! command -v pi >/dev/null 2>&1; then
-          installer="$(mktemp)"
-          curl -fsSL https://pi.dev/install.sh -o "$installer"
-          if [ -r /dev/tty ]; then
-            sh "$installer" </dev/tty
-          else
-            sh "$installer"
-          fi
-          rm -f "$installer"
-          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
-          hash -r
-        fi
-        exec pi "$@"
-      ' pi "$@" >/dev/null
-    local create_status=$?
-    if (( create_status != 0 )); then
-      _pi_agent_report_run_failure "$container" "$create_status"
-      return $create_status
-    fi
-    (( verbose )) && _pi_agent_info "starting pi container: $container"
-    docker start --attach --interactive "$container"
+      /bin/sh -c 'exec sleep infinity' >/dev/null || { _pi_agent_unlock; return $?; }
+    # The image tag is unchanged until the final session exits, so a snapshot is
+    # deliberately created only at that point.
   fi
+  session_file="$(mktemp "$PI_AGENT_STATE_DIR/sessions/session.XXXXXX")" || { _pi_agent_unlock; return $?; }
+  session_id="${session_file:t}"
+  local launcher_pid launcher_started
+  launcher_pid="$(sh -c 'printf "%s" "$PPID"')"
+  launcher_started="$(_pi_agent_process_started_at "$launcher_pid")"
+  print -r -- "pending $launcher_pid $launcher_started" >"$session_file"
+  _pi_agent_unlock
+  trap - HUP INT TERM
+
+  # Phase 2: run Pi or a shell without a global lock.
+  _pi_agent_exec_session "$mode" "$container_workspace" "$session_id" "$verbose" "$@"
   run_status=$?
 
-  (( verbose )) && _pi_agent_info "container exited with status: $run_status"
-  _pi_agent_commit_and_remove "$container" "$snapshot" "$verbose"
-  commit_status=$?
+  # Phase 3: the final session snapshots and commits the shared container.
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; exit 130' HUP INT TERM
+  rm -f "$session_file"
+  _pi_agent_reap_sessions || { _pi_agent_unlock; return 1; }
+  if (( $(_pi_agent_session_count) == 0 )); then
+    snapshot="$(_pi_agent_create_snapshot "$verbose")"
+    commit_status=$?
+    if (( commit_status == 0 )); then
+      (( verbose )) && _pi_agent_info "last session exited; committing shared container"
+      _pi_agent_commit_and_remove "$container" "$snapshot" "$verbose"
+      commit_status=$?
+    fi
+  else
+    (( verbose )) && _pi_agent_info "session exited; shared container remains in use"
+    commit_status=0
+  fi
+  _pi_agent_unlock
+  trap - HUP INT TERM
 
-  if (( PI_AGENT_AUTO_PRUNE )); then
-    (( verbose )) && _pi_agent_info "auto-pruning snapshots with keep count: $PI_AGENT_SNAPSHOT_KEEP"
-    _pi_agent_prune_snapshots "$PI_AGENT_SNAPSHOT_KEEP" "$verbose" || true
-  elif (( verbose )); then
+  if (( commit_status == 0 && PI_AGENT_AUTO_PRUNE )); then
+    if ! docker container inspect "$container" >/dev/null 2>&1; then
+      (( verbose )) && _pi_agent_info "auto-pruning snapshots with keep count: $PI_AGENT_SNAPSHOT_KEEP"
+      _pi_agent_prune_snapshots "$PI_AGENT_SNAPSHOT_KEEP" "$verbose" || true
+    fi
+  elif (( verbose && ! PI_AGENT_AUTO_PRUNE )); then
     _pi_agent_info "auto-prune disabled"
   fi
 
@@ -650,7 +813,7 @@ pi() {
     _pi_agent_usage pi
     return 0
   fi
-  _pi_agent_run pi "$_PI_AGENT_VERBOSE" "${_PI_AGENT_ARGS[@]}"
+  ( _pi_agent_run pi "$_PI_AGENT_VERBOSE" "${_PI_AGENT_ARGS[@]}" )
 }
 
 pi-shell() {
@@ -659,7 +822,7 @@ pi-shell() {
     _pi_agent_usage pi-shell
     return 0
   fi
-  _pi_agent_run shell "$_PI_AGENT_VERBOSE" "${_PI_AGENT_ARGS[@]}"
+  ( _pi_agent_run shell "$_PI_AGENT_VERBOSE" "${_PI_AGENT_ARGS[@]}" )
 }
 
 pi-status() {
@@ -671,13 +834,9 @@ pi-status() {
   _pi_agent_config
   _pi_agent_require_docker || return $?
 
-  local target target_name container_workspace
+  local target container_workspace
   target="$(_pi_agent_target_dir)" || return $?
-  target_name="${target:t}"
-  if [[ -z "$target_name" || "$target_name" == "/" ]]; then
-    target_name="workspace"
-  fi
-  container_workspace="/workspace/$target_name"
+  container_workspace="$(_pi_agent_workspace_for_target "$target" 2>/dev/null)" || container_workspace="(outside workspace root)"
 
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "collecting status for image repo: $PI_AGENT_IMAGE_REPO"
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "host mount target resolved to: $target"
@@ -689,6 +848,8 @@ pi-status() {
   print -r -- "PI_AGENT_BASE_IMAGE=$PI_AGENT_BASE_IMAGE"
   print -r -- "PI_AGENT_CURRENT_IMAGE=$PI_AGENT_CURRENT_IMAGE"
   print -r -- "PI_AGENT_ACTIVE_CONTAINER=$PI_AGENT_ACTIVE_CONTAINER"
+  print -r -- "PI_AGENT_WORKSPACE_ROOT=$PI_AGENT_WORKSPACE_ROOT"
+  print -r -- "PI_AGENT_STATE_DIR=$PI_AGENT_STATE_DIR"
   print -r -- "PI_AGENT_SNAPSHOT_KEEP=$PI_AGENT_SNAPSHOT_KEEP"
   print -r -- "PI_AGENT_AUTO_PRUNE=$PI_AGENT_AUTO_PRUNE"
   print -r -- "PI_AGENT_FLATTEN_LAYER_THRESHOLD=$PI_AGENT_FLATTEN_LAYER_THRESHOLD"
@@ -710,6 +871,7 @@ flattened_at={{index .Config.Labels "pi.agent.flattened_at"}}' 2>/dev/null \
   print -r -- ""
   print -r -- "active container:"
   docker ps -a --filter "name=^/${PI_AGENT_ACTIVE_CONTAINER}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+  print -r -- "active sessions: $(_pi_agent_session_count 2>/dev/null || print 0)"
 }
 
 pi-snapshots() {
@@ -720,6 +882,7 @@ pi-snapshots() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+
   local snapshot_pattern
   snapshot_pattern="$(_pi_agent_snapshot_pattern)"
   local -a snapshots
@@ -734,6 +897,7 @@ pi-snapshots() {
 }
 
 pi-rollback() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-rollback
@@ -741,10 +905,14 @@ pi-rollback() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
+  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
 
   local snapshot="${_PI_AGENT_ARGS[1]}"
   if [[ -z "$snapshot" ]]; then
     print -u2 "usage: pi-rollback <snapshot>"
+    _pi_agent_unlock
     return 2
   fi
 
@@ -754,16 +922,22 @@ pi-rollback() {
 
   if ! _pi_agent_image_exists "$snapshot"; then
     print -u2 "pi-agent-docker: snapshot not found: $snapshot"
+    _pi_agent_unlock
     return 1
   fi
 
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rolling back current image to snapshot: $snapshot"
   docker tag "$snapshot" "$PI_AGENT_CURRENT_IMAGE"
-  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image now points to: $snapshot"
-  return 0
+  local status=$?
+  _pi_agent_unlock
+  if (( status == 0 )); then
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image now points to: $snapshot"
+  fi
+  return $status
 }
 
 pi-reset-system() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-reset-system
@@ -771,14 +945,22 @@ pi-reset-system() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
-  _pi_agent_ensure_base_image "$_PI_AGENT_VERBOSE" || return $?
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
+  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_ensure_base_image "$_PI_AGENT_VERBOSE" || { local status=$?; _pi_agent_unlock; return $status; }
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "resetting current image to base: $PI_AGENT_BASE_IMAGE -> $PI_AGENT_CURRENT_IMAGE"
   docker tag "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_CURRENT_IMAGE"
-  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image reset to base"
-  return 0
+  local status=$?
+  _pi_agent_unlock
+  if (( status == 0 )); then
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image reset to base"
+  fi
+  return $status
 }
 
 pi-reset-all() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-reset-all
@@ -786,6 +968,9 @@ pi-reset-all() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
+  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
 
   local -a images
   local snapshot_pattern
@@ -796,6 +981,7 @@ pi-reset-all() {
 
   if (( ${#images[@]} == 0 )); then
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "no current image or snapshots found to remove"
+    _pi_agent_unlock
     return 0
   fi
 
@@ -807,9 +993,13 @@ pi-reset-all() {
     done
   fi
   docker rmi "${images[@]}"
+  local status=$?
+  _pi_agent_unlock
+  return $status
 }
 
 pi-rebuild-base() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-rebuild-base
@@ -823,21 +1013,35 @@ pi-rebuild-base() {
     return 1
   fi
 
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rebuilding base image: $PI_AGENT_BASE_IMAGE from $PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE"
   docker build -f "$PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE" -t "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_DOCKER_DIR"
+  local status=$?
+  _pi_agent_unlock
+  return $status
 }
 
 pi-prune() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-prune
     return 0
   fi
+  _pi_agent_config
   _pi_agent_require_docker || return $?
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
+  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
   _pi_agent_prune_snapshots "${_PI_AGENT_ARGS[1]:-$PI_AGENT_SNAPSHOT_KEEP}" "$_PI_AGENT_VERBOSE"
+  local status=$?
+  _pi_agent_unlock
+  return $status
 }
 
 pi-flatten() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-flatten
@@ -845,10 +1049,16 @@ pi-flatten() {
   fi
   _pi_agent_config
   _pi_agent_require_docker || return $?
-  _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || return $?
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
+  _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || { local status=$?; _pi_agent_unlock; return $status; }
   if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
     _pi_agent_report_run_failure "$PI_AGENT_ACTIVE_CONTAINER" 75
+    _pi_agent_unlock
     return 75
   fi
   _pi_agent_flatten_current_image "$_PI_AGENT_VERBOSE"
+  local status=$?
+  _pi_agent_unlock
+  return $status
 }

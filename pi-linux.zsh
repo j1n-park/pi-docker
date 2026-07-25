@@ -23,6 +23,8 @@ _pi_agent_config() {
   : "${PI_AGENT_BASE_IMAGE:=${PI_AGENT_IMAGE_REPO}:base}"
   : "${PI_AGENT_CURRENT_IMAGE:=${PI_AGENT_IMAGE_REPO}:current}"
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active-linux}"
+  : "${PI_AGENT_WORKSPACE_ROOT:=$HOME/workspace}"
+  : "${PI_AGENT_STATE_DIR:=${PI_AGENT_DOCKER_DIR}/.state/${PI_AGENT_IMAGE_REPO}}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
   : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
@@ -98,6 +100,7 @@ _pi_agent_maybe_flatten_current_image() {
 }
 
 pi-rebuild-base() {
+  setopt localoptions localtraps
   _pi_agent_extract_verbose "$@"
   if (( _PI_AGENT_HELP )); then
     _pi_agent_usage pi-rebuild-base
@@ -111,6 +114,8 @@ pi-rebuild-base() {
     return 1
   fi
 
+  _pi_agent_lock || return $?
+  trap '_pi_agent_unlock; return 130' HUP INT TERM
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rebuilding base image: $PI_AGENT_BASE_IMAGE from $PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE with uid=$PI_AGENT_HOST_UID gid=$PI_AGENT_HOST_GID"
   docker build \
     -f "$PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE" \
@@ -118,4 +123,7 @@ pi-rebuild-base() {
     --build-arg "AGENT_GID=$PI_AGENT_HOST_GID" \
     -t "$PI_AGENT_BASE_IMAGE" \
     "$PI_AGENT_DOCKER_DIR"
+  local status=$?
+  _pi_agent_unlock
+  return $status
 }

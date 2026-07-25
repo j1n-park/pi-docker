@@ -15,12 +15,35 @@ RUN apt-get update \
         build-essential \
         python3 \
         python3-pip \
+        pipx \
         cmake \
         pkg-config \
         sqlite3 \
         libssl-dev \
+        fd-find \
+        bat \
+        tree \
+        unzip \
+        zip \
+        tmux \
+        htop \
+        shellcheck \
+        default-jdk \
+        golang-go \
+        rustc \
+        cargo \
+        ruby-full \
+        php-cli \
+        perl \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && npm install --global --no-fund --no-audit \
+        typescript \
+        tsx \
+        eslint \
+        prettier \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && ln -s /usr/bin/batcat /usr/local/bin/bat \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -2,10 +2,10 @@
 
 Run Pi Agent as a local `pi` command backed by Docker image snapshots.
 
-This package gives Pi a stateful Docker workstation. Before each run, the
-current image is tagged as a snapshot. After Pi exits, the container is
-committed back to the current image. If the environment gets into a bad state,
-roll back to an earlier snapshot.
+This package gives Pi a stateful Docker workstation. Multiple Pi sessions share
+one Docker container. When the final session exits, the wrapper tags the prior
+image as a snapshot and commits the shared container back to the current image.
+If the environment gets into a bad state, roll back to an earlier snapshot.
 
 This does not make projects reproducible. Project reproducibility belongs in
 the project repo through its own `Dockerfile`, scripts, `Makefile`, `mise`
@@ -177,21 +177,25 @@ pi-flatten
 ```
 
 By default, `PI_AGENT_AUTO_PRUNE=1` keeps the newest
-`PI_AGENT_SNAPSHOT_KEEP=10` snapshots after each run.
+`PI_AGENT_SNAPSHOT_KEEP=10` snapshots after the shared container is committed.
 
 ## Mounts
 
-Inside a Git repo, the repo root is mounted read/write at
-`/workspace/<repo-name>`. Outside a Git repo, the current directory is mounted
-at `/workspace/<directory-name>`.
+The shared container mounts `PI_AGENT_WORKSPACE_ROOT` read/write at
+`/workspace`. By default this is `$HOME/workspace`. Every project opened by
+`pi` or `pi-shell` must be below this root; a project keeps its corresponding
+path below `/workspace`.
 
-The container working directory is the mounted project directory, not bare
-`/workspace`. This keeps resumed Pi sessions scoped to the project path.
+For example, with `PI_AGENT_WORKSPACE_ROOT=$HOME/workspace`, running Pi in
+`$HOME/workspace/api` starts it in `/workspace/api`. Set the variable before
+sourcing the wrapper if your projects live elsewhere. The root is the only host
+directory mounted into the container, so choose a directory containing only
+projects you intend Pi to access.
 
 ## Concurrency
 
-Only one `pi` or `pi-shell` run can be active at a time. Docker enforces this
-with a fixed container name:
+Several `pi` and `pi-shell` sessions can run concurrently. They use `docker
+exec` against one shared container:
 
 ```sh
 pi-agent-active
@@ -203,7 +207,14 @@ Linux:
 pi-agent-active-linux
 ```
 
-If a run is killed abruptly, the active container name may remain. Inspect it
+The wrapper serializes only lifecycle work: starting the shared container,
+deciding that the final session exited, snapshotting, committing, and removing
+the container. Pi commands, installs, and updates inside the container are not
+globally locked.
+
+If a terminal is force-killed, its host-side session marker is reconciled from
+the container on the next session exit. Inspect the count with `pi-status` if
+the container appears to remain in use unexpectedly. Inspect the container
 first:
 
 ```sh
@@ -239,6 +250,8 @@ PI_AGENT_IMAGE_REPO="pi-agent-sandbox"
 PI_AGENT_BASE_IMAGE="pi-agent-sandbox:base"
 PI_AGENT_CURRENT_IMAGE="pi-agent-sandbox:current"
 PI_AGENT_ACTIVE_CONTAINER="pi-agent-active"
+PI_AGENT_WORKSPACE_ROOT="$HOME/workspace"
+PI_AGENT_STATE_DIR="$PI_AGENT_DOCKER_DIR/.state/$PI_AGENT_IMAGE_REPO"
 PI_AGENT_SNAPSHOT_KEEP="10"
 PI_AGENT_AUTO_PRUNE="1"
 PI_AGENT_FLATTEN_LAYER_THRESHOLD="100"
