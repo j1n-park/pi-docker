@@ -177,11 +177,17 @@ Flatten the current image manually:
 pi-flatten
 ```
 
-Verify that the lifecycle lock is available:
+Save and stop an idle shared container after an interrupted session:
 
 ```sh
 pi-quick-fix --verbose
 ```
+
+`pi-quick-fix` removes stale session markers, tags the previous current image as
+a rollback snapshot, commits the shared container filesystem to the current
+image, and removes the container. It refuses to stop the container if a live
+`pi` or `pi-shell` session still exists. If there is no shared container, it
+only verifies that the lifecycle lock is available.
 
 The `lifecycle.lock` file is intentionally persistent. `flock` releases the
 kernel lock when its file descriptor closes; deleting the file can split
@@ -238,16 +244,11 @@ Linux:
 docker ps -a --filter 'name=^/pi-agent-active-linux$'
 ```
 
-Remove it only if it is stale:
+If it is stale, save its container-local state and remove it through the
+lifecycle recovery command:
 
 ```sh
-docker rm pi-agent-active
-```
-
-Linux:
-
-```sh
-docker rm pi-agent-active-linux
+pi-quick-fix --verbose
 ```
 
 If committing the final session fails, the wrapper leaves the shared container

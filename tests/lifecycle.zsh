@@ -73,7 +73,11 @@ test_commit_success_removes_container() {
 test_quick_fix_keeps_lock_file() {
   local temp_dir
   temp_dir="$(mktemp -d)"
-  PI_AGENT_STATE_DIR="$temp_dir/state"
+  local PI_AGENT_STATE_DIR="$temp_dir/state"
+
+  docker() {
+    return 1
+  }
 
   pi-quick-fix --verbose >/dev/null 2>"$temp_dir/error"
   pi-quick-fix --verbose >/dev/null 2>>"$temp_dir/error"
@@ -90,8 +94,95 @@ test_quick_fix_keeps_lock_file() {
   rm -rf "$temp_dir"
 }
 
+test_quick_fix_saves_and_stops_idle_container() {
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  local calls="$temp_dir/docker.calls"
+  local PI_AGENT_STATE_DIR="$temp_dir/state"
+  local PI_AGENT_ACTIVE_CONTAINER="test-active"
+  local PI_AGENT_CURRENT_IMAGE="test:current"
+  local PI_AGENT_IMAGE_REPO="test"
+  local PI_AGENT_AUTO_PRUNE=0
+
+  docker() {
+    print -r -- "$*" >>"$calls"
+    case "$1 $2" in
+      "container inspect")
+        if [[ "$*" == *"--format"* ]]; then
+          print -r -- true
+        fi
+        return 0
+        ;;
+      "image inspect")
+        return 1
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  }
+
+  pi-quick-fix --verbose >/dev/null 2>"$temp_dir/error"
+
+  assert_eq 1 "$(grep -Ec '^tag test:current test:snap-[0-9]{8}-[0-9]{6}$' "$calls")" \
+    "quick fix must snapshot the previous current image"
+  assert_eq 1 "$(grep -c '^commit ' "$calls")" \
+    "quick fix must commit the idle container"
+  assert_eq 1 "$(grep -c '^rm -f test-active$' "$calls")" \
+    "quick fix must remove the container after saving it"
+
+  rm -rf "$temp_dir"
+}
+
+test_quick_fix_refuses_active_session() {
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  local calls="$temp_dir/docker.calls"
+  local PI_AGENT_STATE_DIR="$temp_dir/state"
+  local PI_AGENT_ACTIVE_CONTAINER="test-active"
+  local PI_AGENT_CURRENT_IMAGE="test:current"
+  local PI_AGENT_IMAGE_REPO="test"
+  mkdir -p "$PI_AGENT_STATE_DIR/sessions"
+  print -r -- "pending 123 test" >"$PI_AGENT_STATE_DIR/sessions/session.active"
+
+  docker() {
+    print -r -- "$*" >>"$calls"
+    case "$1 $2" in
+      "container inspect")
+        if [[ "$*" == *"--format"* ]]; then
+          print -r -- true
+        fi
+        return 0
+        ;;
+      "exec "*)
+        print -r -- alive
+        return 0
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  }
+
+  set +e
+  pi-quick-fix >/dev/null 2>"$temp_dir/error"
+  local quick_fix_status=$?
+  set -e
+
+  assert_eq 75 "$quick_fix_status" "quick fix must refuse a live session"
+  assert_eq 0 "$(grep -Ec '^(tag|commit|rm) ' "$calls" || true)" \
+    "quick fix must not save or stop a container with a live session"
+  (( tests_run += 1 ))
+  grep -q 'still has 1 active session' "$temp_dir/error" ||
+    fail "quick fix must explain why an active container was preserved"
+
+  rm -rf "$temp_dir"
+}
+
 test_commit_failure_preserves_container
 test_commit_success_removes_container
 test_quick_fix_keeps_lock_file
+test_quick_fix_saves_and_stops_idle_container
+test_quick_fix_refuses_active_session
 
 print -r -- "PASS: $tests_run lifecycle assertions"

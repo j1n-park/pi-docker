@@ -93,7 +93,7 @@ Helper commands:
   pi-rebuild-base  Rebuild the base image from the Dockerfile.
   pi-prune         Remove older snapshots.
   pi-flatten       Flatten the current image to reset Docker layer depth.
-  pi-quick-fix     Verify that the lifecycle lock is available.
+  pi-quick-fix     Save and stop an idle shared container.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -230,11 +230,15 @@ EOF
       cat <<EOF
 Usage: pi-quick-fix [-v|--verbose] [-h|--help]
 
-Verify that the lifecycle lock can be acquired. The lock file is persistent:
-an unlocked file is normal and must not be removed.
+Recover an idle shared container by snapshotting the previous current image,
+committing the container filesystem to the current image, and removing the
+container. Refuses to stop the container while a Pi session is still active.
+
+If no shared container exists, verify that the lifecycle lock can be acquired.
+The lock file is persistent: an unlocked file is normal and must not be removed.
 
 Options:
-  -v, --verbose  Print the lock path and progress to stderr.
+  -v, --verbose  Print recovery and lock progress to stderr.
   -h, --help     Show this help message.
 
 Lock file:
@@ -1130,6 +1134,8 @@ pi-quick-fix() {
     _pi_agent_usage pi-quick-fix
     return 0
   fi
+  _pi_agent_config
+  _pi_agent_require_docker || return $?
   _pi_agent_prepare_state_dir || return $?
 
   zmodload zsh/system || {
@@ -1147,7 +1153,60 @@ pi-quick-fix() {
     return 75
   fi
 
-  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is healthy and available: $lock"
+  local container="$PI_AGENT_ACTIVE_CONTAINER"
+  local session_count snapshot quick_fix_status=0
+
+  if ! docker container inspect "$container" >/dev/null 2>&1; then
+    rm -f "$PI_AGENT_STATE_DIR"/sessions/*(N)
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is healthy and available: $lock"
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "no shared container needs recovery: $container"
+    _pi_agent_unlock
+    return 0
+  fi
+
+  if _pi_agent_container_running; then
+    _pi_agent_reap_sessions || {
+      quick_fix_status=$?
+      _pi_agent_unlock
+      return $quick_fix_status
+    }
+  else
+    # A stopped container cannot contain a live exec session. Any host-side
+    # markers belong to the interrupted container generation being recovered.
+    rm -f "$PI_AGENT_STATE_DIR"/sessions/*(N)
+  fi
+
+  session_count="$(_pi_agent_session_count)" || {
+    quick_fix_status=$?
+    _pi_agent_unlock
+    return $quick_fix_status
+  }
+  if (( session_count != 0 )); then
+    print -u2 "pi-agent-docker: shared container still has $session_count active session(s): $container"
+    print -u2 "pi-agent-docker: wait for active sessions to exit before running pi-quick-fix"
+    _pi_agent_unlock
+    return 75
+  fi
+
+  snapshot="$(_pi_agent_create_snapshot "$_PI_AGENT_VERBOSE")"
+  quick_fix_status=$?
+  if (( quick_fix_status == 0 )); then
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "saving and stopping idle shared container: $container"
+    _pi_agent_commit_and_remove "$container" "$snapshot" "$_PI_AGENT_VERBOSE"
+    quick_fix_status=$?
+  fi
   _pi_agent_unlock
-  return 0
+
+  if (( quick_fix_status == 0 && PI_AGENT_AUTO_PRUNE )); then
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "auto-pruning snapshots with keep count: $PI_AGENT_SNAPSHOT_KEEP"
+    _pi_agent_prune_snapshots "$PI_AGENT_SNAPSHOT_KEEP" "$_PI_AGENT_VERBOSE" || true
+  elif (( _PI_AGENT_VERBOSE && ! PI_AGENT_AUTO_PRUNE )); then
+    _pi_agent_info "auto-prune disabled"
+  fi
+
+  if (( quick_fix_status != 0 )); then
+    print -u2 "pi-agent-docker: could not recover shared container: $container"
+    print -u2 "pi-agent-docker: recoverable state was not intentionally removed"
+  fi
+  return $quick_fix_status
 }
