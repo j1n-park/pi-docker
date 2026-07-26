@@ -237,7 +237,7 @@ test_quick_fix_refuses_active_session() {
   rm -rf "$temp_dir"
 }
 
-test_quick_fix_breaks_busy_lock_by_stopping_orphan() {
+test_quick_fix_commits_before_removing_orphan_with_busy_lock() {
   setopt localoptions nobgnice
   local temp_dir
   temp_dir="$(mktemp -d)"
@@ -266,11 +266,11 @@ test_quick_fix_breaks_busy_lock_by_stopping_orphan() {
     case "$1 $2" in
       "container inspect")
         if [[ "$*" == *"--format"* ]]; then
-          [[ -e "$release_lock" ]] && print -r -- false || print -r -- true
+          print -r -- true
         fi
         return 0
         ;;
-      "stop --time")
+      "rm -f")
         : >"$release_lock"
         return 0
         ;;
@@ -286,12 +286,18 @@ test_quick_fix_breaks_busy_lock_by_stopping_orphan() {
   pi-quick-fix --verbose >/dev/null 2>"$temp_dir/error"
   wait "$holder_pid"
 
-  assert_eq 1 "$(grep -c '^stop --time 1 test-active$' "$calls")" \
-    "quick fix must stop an orphan that is keeping lifecycle recovery blocked"
+  assert_eq 0 "$(grep -c '^stop ' "$calls" || true)" \
+    "quick fix must not stop an orphan before saving it"
   assert_eq 1 "$(grep -c '^commit ' "$calls")" \
-    "quick fix must commit the stopped orphan"
+    "quick fix must commit the orphan despite the busy lifecycle lock"
   assert_eq 1 "$(grep -c '^rm -f test-active$' "$calls")" \
     "quick fix must remove the orphan after committing it"
+  local commit_line remove_line
+  commit_line="$(grep -n '^commit ' "$calls" | cut -d: -f1)"
+  remove_line="$(grep -n '^rm -f test-active$' "$calls" | cut -d: -f1)"
+  (( tests_run += 1 ))
+  (( commit_line < remove_line )) ||
+    fail "quick fix must commit the orphan before removing it"
   (( tests_run += 1 ))
   ! grep -q 'failed to lock file' "$temp_dir/error" ||
     fail "quick fix must suppress the low-level nonblocking flock error"
@@ -305,6 +311,6 @@ test_quick_fix_keeps_lock_file
 test_quick_fix_saves_and_stops_idle_container
 test_quick_fix_recovers_interrupted_session
 test_quick_fix_refuses_active_session
-test_quick_fix_breaks_busy_lock_by_stopping_orphan
+test_quick_fix_commits_before_removing_orphan_with_busy_lock
 
 print -r -- "PASS: $tests_run lifecycle assertions"

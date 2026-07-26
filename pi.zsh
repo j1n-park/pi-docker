@@ -236,8 +236,8 @@ snapshotted, the container filesystem is committed to the current image, and
 the container is removed.
 
 The persistent lifecycle lock file is acquired but not removed. If an orphaned
-running container is preventing a lifecycle operation from releasing the lock,
-the container is stopped first and committed after the lock is acquired.
+container is preventing a lifecycle operation from releasing the lock, an
+independent recovery lock is used to commit the container before removing it.
 Recovery is refused while a host-side Pi session is still active. If no shared
 container exists, there is nothing to recover.
 
@@ -1176,6 +1176,9 @@ pi-quick-fix() {
   local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
   [[ -e "$lock" ]] || : >"$lock"
   local _PI_AGENT_LOCK_FD
+  local _PI_AGENT_RECOVERY_LOCK_FD
+  local recovery_lock="$PI_AGENT_STATE_DIR/recovery.lock"
+  local using_recovery_lock=0
   if ! zsystem flock -t 0 -f _PI_AGENT_LOCK_FD "$lock" 2>/dev/null; then
     _pi_agent_unlock
 
@@ -1191,18 +1194,18 @@ pi-quick-fix() {
       return 75
     fi
 
-    if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1 &&
-        _pi_agent_container_running; then
-      (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is busy with no live host session; stopping orphaned container"
-      if ! docker stop --time 1 "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null; then
-        print -u2 "pi-agent-docker: could not stop orphaned shared container: $PI_AGENT_ACTIVE_CONTAINER"
-        print -u2 "pi-agent-docker: recoverable state was not intentionally removed"
-        return 1
+    if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
+      # The normal lock owner may itself be blocked on this container. Serialize
+      # emergency recoveries separately, then save the filesystem before doing
+      # anything that can stop or remove the container.
+      [[ -e "$recovery_lock" ]] || : >"$recovery_lock"
+      if ! zsystem flock -t 0 -f _PI_AGENT_RECOVERY_LOCK_FD "$recovery_lock" 2>/dev/null; then
+        print -u2 "pi-agent-docker: another quick-fix recovery is already running"
+        print -u2 "pi-agent-docker: $recovery_lock"
+        return 75
       fi
-      # Stopping the container releases any docker exec that was preventing the
-      # old lifecycle operation from dropping the lock. Serialize the snapshot
-      # and commit normally once that owner has unwound.
-      _pi_agent_lock || return $?
+      using_recovery_lock=1
+      (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is busy with no live host session; committing orphaned container before stopping it"
     else
       print -u2 "pi-agent-docker: lifecycle operation is still running; lock is healthy but busy"
       print -u2 "pi-agent-docker: $lock"
@@ -1217,7 +1220,11 @@ pi-quick-fix() {
     rm -f "$PI_AGENT_STATE_DIR"/sessions/*(N)
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is healthy and available: $lock"
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "no shared container needs recovery: $container"
-    _pi_agent_unlock
+    if (( using_recovery_lock )); then
+      zsystem flock -u "$_PI_AGENT_RECOVERY_LOCK_FD" 2>/dev/null || true
+    else
+      _pi_agent_unlock
+    fi
     return 0
   fi
 
@@ -1228,13 +1235,21 @@ pi-quick-fix() {
 
   session_count="$(_pi_agent_session_count)" || {
     quick_fix_status=$?
-    _pi_agent_unlock
+    if (( using_recovery_lock )); then
+      zsystem flock -u "$_PI_AGENT_RECOVERY_LOCK_FD" 2>/dev/null || true
+    else
+      _pi_agent_unlock
+    fi
     return $quick_fix_status
   }
   if (( session_count != 0 )); then
     print -u2 "pi-agent-docker: shared container still has $session_count active host session(s): $container"
     print -u2 "pi-agent-docker: wait for active sessions to exit before running pi-quick-fix"
-    _pi_agent_unlock
+    if (( using_recovery_lock )); then
+      zsystem flock -u "$_PI_AGENT_RECOVERY_LOCK_FD" 2>/dev/null || true
+    else
+      _pi_agent_unlock
+    fi
     return 75
   fi
 
@@ -1245,7 +1260,11 @@ pi-quick-fix() {
     _pi_agent_commit_and_remove "$container" "$snapshot" "$_PI_AGENT_VERBOSE"
     quick_fix_status=$?
   fi
-  _pi_agent_unlock
+  if (( using_recovery_lock )); then
+    zsystem flock -u "$_PI_AGENT_RECOVERY_LOCK_FD" 2>/dev/null || true
+  else
+    _pi_agent_unlock
+  fi
 
   if (( quick_fix_status == 0 && PI_AGENT_AUTO_PRUNE )); then
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "auto-pruning snapshots with keep count: $PI_AGENT_SNAPSHOT_KEEP"

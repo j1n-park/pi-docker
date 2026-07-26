@@ -189,9 +189,9 @@ whose host-side launcher has disappeared, tags the previous current image as a
 rollback snapshot, commits the orphaned shared container filesystem to the
 current image, and removes the container. If an inaccessible orphan container
 has left a lifecycle operation holding the lock, quick-fix verifies that no
-host-side session is alive, stops the container to unblock that operation, then
-acquires the lock and commits the stopped container. It refuses recovery while
-a live host-side `pi` or `pi-shell` session still exists.
+host-side session is alive, takes a separate recovery lock, commits the
+container, and only then removes it. It refuses recovery while a live host-side
+`pi` or `pi-shell` session still exists.
 
 The `lifecycle.lock` file is intentionally persistent. `flock` releases the
 kernel lock when its file descriptor closes; deleting the file can split
