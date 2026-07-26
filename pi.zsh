@@ -235,9 +235,11 @@ interrupted. Stale session markers are removed, the previous current image is
 snapshotted, the container filesystem is committed to the current image, and
 the container is removed.
 
-The persistent lifecycle lock file is acquired but not removed. Recovery is
-refused if its lock is held or a host-side Pi session is still active. If no
-shared container exists, there is nothing to recover.
+The persistent lifecycle lock file is acquired but not removed. If an orphaned
+running container is preventing a lifecycle operation from releasing the lock,
+the container is stopped first and committed after the lock is acquired.
+Recovery is refused while a host-side Pi session is still active. If no shared
+container exists, there is nothing to recover.
 
 Options:
   -v, --verbose  Print recovery and lock progress to stderr.
@@ -388,6 +390,21 @@ _pi_agent_reap_sessions() {
       if [[ "$launcher_pid" != <-> || -z "$launcher_started" || "$current_started" != "$launcher_started" ]]; then
         rm -f "$session_file"
       fi
+    fi
+  done
+}
+
+_pi_agent_reap_host_sessions() {
+  _pi_agent_config
+  local session_file launcher_pid launcher_started current_started
+  local -a sessions
+  sessions=("$PI_AGENT_STATE_DIR"/sessions/*(N))
+  for session_file in "${sessions[@]}"; do
+    launcher_pid="$(awk 'NR == 1 { print $2 }' "$session_file" 2>/dev/null)"
+    launcher_started="$(awk 'NR == 1 { $1=$2=""; sub(/^  */, ""); print }' "$session_file" 2>/dev/null)"
+    current_started="$(_pi_agent_process_started_at "$launcher_pid")"
+    if [[ "$launcher_pid" != <-> || -z "$launcher_started" || "$current_started" != "$launcher_started" ]]; then
+      rm -f "$session_file"
     fi
   done
 }
@@ -1159,11 +1176,38 @@ pi-quick-fix() {
   local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
   [[ -e "$lock" ]] || : >"$lock"
   local _PI_AGENT_LOCK_FD
-  if ! zsystem flock -t 0 -f _PI_AGENT_LOCK_FD "$lock"; then
+  if ! zsystem flock -t 0 -f _PI_AGENT_LOCK_FD "$lock" 2>/dev/null; then
     _pi_agent_unlock
-    print -u2 "pi-agent-docker: lifecycle operation is still running; lock is healthy but busy"
-    print -u2 "pi-agent-docker: $lock"
-    return 75
+
+    # Recovery must also work when a failed container exec left a lifecycle
+    # operation stuck while holding the lock. Host markers are sufficient to
+    # protect live sessions here and do not require access to the container.
+    _pi_agent_reap_host_sessions
+    local host_session_count
+    host_session_count="$(_pi_agent_session_count)" || return $?
+    if (( host_session_count != 0 )); then
+      print -u2 "pi-agent-docker: shared container still has $host_session_count active host session(s): $PI_AGENT_ACTIVE_CONTAINER"
+      print -u2 "pi-agent-docker: wait for active sessions to exit before running pi-quick-fix"
+      return 75
+    fi
+
+    if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1 &&
+        _pi_agent_container_running; then
+      (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is busy with no live host session; stopping orphaned container"
+      if ! docker stop --time 1 "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null; then
+        print -u2 "pi-agent-docker: could not stop orphaned shared container: $PI_AGENT_ACTIVE_CONTAINER"
+        print -u2 "pi-agent-docker: recoverable state was not intentionally removed"
+        return 1
+      fi
+      # Stopping the container releases any docker exec that was preventing the
+      # old lifecycle operation from dropping the lock. Serialize the snapshot
+      # and commit normally once that owner has unwound.
+      _pi_agent_lock || return $?
+    else
+      print -u2 "pi-agent-docker: lifecycle operation is still running; lock is healthy but busy"
+      print -u2 "pi-agent-docker: $lock"
+      return 75
+    fi
   fi
 
   local container="$PI_AGENT_ACTIVE_CONTAINER"
@@ -1177,17 +1221,10 @@ pi-quick-fix() {
     return 0
   fi
 
-  if _pi_agent_container_running; then
-    _pi_agent_reap_sessions 1 || {
-      quick_fix_status=$?
-      _pi_agent_unlock
-      return $quick_fix_status
-    }
-  else
-    # A stopped container cannot contain a live exec session. Any host-side
-    # markers belong to the interrupted container generation being recovered.
-    rm -f "$PI_AGENT_STATE_DIR"/sessions/*(N)
-  fi
+  # Recovery cannot depend on docker exec: an unresponsive exec path is one of
+  # the reasons this command is needed. A matching host launcher is the
+  # authority for whether a session is still live.
+  _pi_agent_reap_host_sessions
 
   session_count="$(_pi_agent_session_count)" || {
     quick_fix_status=$?

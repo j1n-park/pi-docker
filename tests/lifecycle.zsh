@@ -173,6 +173,8 @@ test_quick_fix_recovers_interrupted_session() {
 
   assert_eq 0 "$(_pi_agent_session_count)" \
     "quick fix must remove an interrupted host session marker"
+  assert_eq 0 "$(grep -c '^exec ' "$calls" || true)" \
+    "quick fix must not require exec access to the container"
   assert_eq 1 "$(grep -c '^commit ' "$calls")" \
     "quick fix must save a container left by an interrupted session"
   assert_eq 1 "$(grep -c '^rm -f test-active$' "$calls")" \
@@ -235,11 +237,74 @@ test_quick_fix_refuses_active_session() {
   rm -rf "$temp_dir"
 }
 
+test_quick_fix_breaks_busy_lock_by_stopping_orphan() {
+  setopt localoptions nobgnice
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  local calls="$temp_dir/docker.calls"
+  local release_lock="$temp_dir/release-lock"
+  local PI_AGENT_STATE_DIR="$temp_dir/state"
+  local PI_AGENT_ACTIVE_CONTAINER="test-active"
+  local PI_AGENT_CURRENT_IMAGE="test:current"
+  local PI_AGENT_IMAGE_REPO="test"
+  local PI_AGENT_AUTO_PRUNE=0
+  local PI_AGENT_LOCK_TIMEOUT=2
+  mkdir -p "$PI_AGENT_STATE_DIR/sessions"
+  : >"$PI_AGENT_STATE_DIR/lifecycle.lock"
+
+  zsh -c '
+    zmodload zsh/system
+    zsystem flock -f lock_fd "$1"
+    print -r -- locked >"$2"
+    while [[ ! -e "$3" ]]; do sleep 0.05; done
+  ' zsh "$PI_AGENT_STATE_DIR/lifecycle.lock" "$temp_dir/locked" "$release_lock" 2>/dev/null &
+  local holder_pid=$!
+  while [[ ! -e "$temp_dir/locked" ]]; do sleep 0.05; done
+
+  docker() {
+    print -r -- "$*" >>"$calls"
+    case "$1 $2" in
+      "container inspect")
+        if [[ "$*" == *"--format"* ]]; then
+          [[ -e "$release_lock" ]] && print -r -- false || print -r -- true
+        fi
+        return 0
+        ;;
+      "stop --time")
+        : >"$release_lock"
+        return 0
+        ;;
+      "image inspect")
+        return 1
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  }
+
+  pi-quick-fix --verbose >/dev/null 2>"$temp_dir/error"
+  wait "$holder_pid"
+
+  assert_eq 1 "$(grep -c '^stop --time 1 test-active$' "$calls")" \
+    "quick fix must stop an orphan that is keeping lifecycle recovery blocked"
+  assert_eq 1 "$(grep -c '^commit ' "$calls")" \
+    "quick fix must commit the stopped orphan"
+  assert_eq 1 "$(grep -c '^rm -f test-active$' "$calls")" \
+    "quick fix must remove the orphan after committing it"
+  (( tests_run += 1 ))
+  ! grep -q 'failed to lock file' "$temp_dir/error" ||
+    fail "quick fix must suppress the low-level nonblocking flock error"
+
+  rm -rf "$temp_dir"
+}
+
 test_commit_failure_preserves_container
 test_commit_success_removes_container
 test_quick_fix_keeps_lock_file
 test_quick_fix_saves_and_stops_idle_container
 test_quick_fix_recovers_interrupted_session
 test_quick_fix_refuses_active_session
+test_quick_fix_breaks_busy_lock_by_stopping_orphan
 
 print -r -- "PASS: $tests_run lifecycle assertions"
