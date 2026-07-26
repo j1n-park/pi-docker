@@ -93,7 +93,7 @@ Helper commands:
   pi-rebuild-base  Rebuild the base image from the Dockerfile.
   pi-prune         Remove older snapshots.
   pi-flatten       Flatten the current image to reset Docker layer depth.
-  pi-quick-fix     Save and stop an idle shared container.
+  pi-quick-fix     Recover a container left by interrupted sessions.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -230,12 +230,14 @@ EOF
       cat <<EOF
 Usage: pi-quick-fix [-v|--verbose] [-h|--help]
 
-Recover an idle shared container by snapshotting the previous current image,
-committing the container filesystem to the current image, and removing the
-container. Refuses to stop the container while a Pi session is still active.
+Recover a shared container left behind after pi or pi-shell sessions were
+interrupted. Stale session markers are removed, the previous current image is
+snapshotted, the container filesystem is committed to the current image, and
+the container is removed.
 
-If no shared container exists, verify that the lifecycle lock can be acquired.
-The lock file is persistent: an unlocked file is normal and must not be removed.
+The persistent lifecycle lock file is acquired but not removed. Recovery is
+refused if its lock is held or a host-side Pi session is still active. If no
+shared container exists, there is nothing to recover.
 
 Options:
   -v, --verbose  Print recovery and lock progress to stderr.
@@ -329,6 +331,7 @@ _pi_agent_process_started_at() {
 
 _pi_agent_reap_sessions() {
   _pi_agent_config
+  local require_launcher="${1:-0}"
   local container="$PI_AGENT_ACTIVE_CONTAINER" session_file session_id launcher_pid launcher_started current_started marker_state query_status
   local -a sessions
   sessions=("$PI_AGENT_STATE_DIR"/sessions/*(N))
@@ -376,6 +379,16 @@ _pi_agent_reap_sessions() {
         return 1
         ;;
     esac
+    if [[ "$marker_state" == "alive" ]] && (( require_launcher )); then
+      # pi-quick-fix is specifically for interrupted host sessions. An exec
+      # process may survive after its host-side docker client disappears, so
+      # require the launcher process to still be the one that registered the
+      # session before treating it as active.
+      current_started="$(_pi_agent_process_started_at "$launcher_pid")"
+      if [[ "$launcher_pid" != <-> || -z "$launcher_started" || "$current_started" != "$launcher_started" ]]; then
+        rm -f "$session_file"
+      fi
+    fi
   done
 }
 
@@ -1165,7 +1178,7 @@ pi-quick-fix() {
   fi
 
   if _pi_agent_container_running; then
-    _pi_agent_reap_sessions || {
+    _pi_agent_reap_sessions 1 || {
       quick_fix_status=$?
       _pi_agent_unlock
       return $quick_fix_status
@@ -1182,7 +1195,7 @@ pi-quick-fix() {
     return $quick_fix_status
   }
   if (( session_count != 0 )); then
-    print -u2 "pi-agent-docker: shared container still has $session_count active session(s): $container"
+    print -u2 "pi-agent-docker: shared container still has $session_count active host session(s): $container"
     print -u2 "pi-agent-docker: wait for active sessions to exit before running pi-quick-fix"
     _pi_agent_unlock
     return 75
@@ -1191,7 +1204,7 @@ pi-quick-fix() {
   snapshot="$(_pi_agent_create_snapshot "$_PI_AGENT_VERBOSE")"
   quick_fix_status=$?
   if (( quick_fix_status == 0 )); then
-    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "saving and stopping idle shared container: $container"
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "saving and stopping orphaned shared container: $container"
     _pi_agent_commit_and_remove "$container" "$snapshot" "$_PI_AGENT_VERBOSE"
     quick_fix_status=$?
   fi

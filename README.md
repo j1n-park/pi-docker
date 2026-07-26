@@ -177,17 +177,18 @@ Flatten the current image manually:
 pi-flatten
 ```
 
-Save and stop an idle shared container after an interrupted session:
+Recover a shared container left behind after an interrupted `pi` or `pi-shell`
+session:
 
 ```sh
 pi-quick-fix --verbose
 ```
 
-`pi-quick-fix` removes stale session markers, tags the previous current image as
-a rollback snapshot, commits the shared container filesystem to the current
-image, and removes the container. It refuses to stop the container if a live
-`pi` or `pi-shell` session still exists. If there is no shared container, it
-only verifies that the lifecycle lock is available.
+`pi-quick-fix` acquires the existing lifecycle lock, removes session markers
+whose host-side launcher has disappeared, tags the previous current image as a
+rollback snapshot, commits the orphaned shared container filesystem to the
+current image, and removes the container. It refuses recovery if the lock is
+currently held or a live host-side `pi` or `pi-shell` session still exists.
 
 The `lifecycle.lock` file is intentionally persistent. `flock` releases the
 kernel lock when its file descriptor closes; deleting the file can split
