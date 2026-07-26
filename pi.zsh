@@ -93,6 +93,7 @@ Helper commands:
   pi-rebuild-base  Rebuild the base image from the Dockerfile.
   pi-prune         Remove older snapshots.
   pi-flatten       Flatten the current image to reset Docker layer depth.
+  pi-quick-fix     Remove an unused lifecycle lock file.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -223,6 +224,21 @@ Options:
 Arguments:
   keep           Number of newest snapshots to keep.
                  Defaults to PI_AGENT_SNAPSHOT_KEEP=$PI_AGENT_SNAPSHOT_KEEP.
+EOF
+      ;;
+    pi-quick-fix)
+      cat <<EOF
+Usage: pi-quick-fix [-v|--verbose] [-h|--help]
+
+Remove the lifecycle lock file when no lifecycle operation is currently
+running. The lock file will be recreated automatically on the next operation.
+
+Options:
+  -v, --verbose  Print the lock path and progress to stderr.
+  -h, --help     Show this help message.
+
+Lock file:
+  $PI_AGENT_STATE_DIR/lifecycle.lock
 EOF
       ;;
     pi-flatten)
@@ -1094,4 +1110,40 @@ pi-flatten() {
   local status=$?
   _pi_agent_unlock
   return $status
+}
+
+pi-quick-fix() {
+  setopt localoptions localtraps
+  _pi_agent_extract_verbose "$@"
+  if (( _PI_AGENT_HELP )); then
+    _pi_agent_usage pi-quick-fix
+    return 0
+  fi
+  _pi_agent_config
+  _pi_agent_validate_state_dir || return $?
+
+  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
+  if [[ ! -e "$lock" ]]; then
+    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock does not exist: $lock"
+    return 0
+  fi
+
+  zmodload zsh/system || {
+    print -u2 "pi-agent-docker: could not load zsh/system for lifecycle locking"
+    return 1
+  }
+
+  local _PI_AGENT_LOCK_FD
+  if ! zsystem flock -t 0 -f _PI_AGENT_LOCK_FD "$lock"; then
+    print -u2 "pi-agent-docker: lifecycle operation is still running; lock was not removed"
+    print -u2 "pi-agent-docker: $lock"
+    return 75
+  fi
+
+  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "removing unused lifecycle lock: $lock"
+  rm -f -- "$lock"
+  local remove_status=$?
+  zsystem flock -u "$_PI_AGENT_LOCK_FD" 2>/dev/null || true
+  unset _PI_AGENT_LOCK_FD
+  return $remove_status
 }

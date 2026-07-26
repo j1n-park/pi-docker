@@ -177,6 +177,13 @@ Flatten the current image manually:
 pi-flatten
 ```
 
+Remove an unused lifecycle lock after confirming no Pi lifecycle operation is
+running:
+
+```sh
+pi-quick-fix
+```
+
 By default, `PI_AGENT_AUTO_PRUNE=1` keeps the newest
 `PI_AGENT_SNAPSHOT_KEEP=10` snapshots after the shared container is committed.
 
