@@ -25,7 +25,7 @@ _pi_agent_config() {
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active-linux}"
   : "${PI_AGENT_WORKSPACE_ROOT:=$HOME/workspace}"
   : "${PI_AGENT_STATE_DIR:=${PI_AGENT_DOCKER_DIR}/.state/${PI_AGENT_IMAGE_REPO}}"
-  : "${PI_AGENT_LOCK_TIMEOUT:=30}"
+  : "${PI_AGENT_LOCK_TIMEOUT:=5}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
   : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"

@@ -26,7 +26,7 @@ _pi_agent_config() {
   : "${PI_AGENT_ACTIVE_CONTAINER:=pi-agent-active}"
   : "${PI_AGENT_WORKSPACE_ROOT:=$HOME/workspace}"
   : "${PI_AGENT_STATE_DIR:=${PI_AGENT_DOCKER_DIR}/.state/${PI_AGENT_IMAGE_REPO}}"
-  : "${PI_AGENT_LOCK_TIMEOUT:=30}"
+  : "${PI_AGENT_LOCK_TIMEOUT:=5}"
   : "${PI_AGENT_SNAPSHOT_KEEP:=10}"
   : "${PI_AGENT_AUTO_PRUNE:=1}"
   : "${PI_AGENT_FLATTEN_LAYER_THRESHOLD:=100}"
@@ -93,7 +93,7 @@ Helper commands:
   pi-rebuild-base  Rebuild the base image from the Dockerfile.
   pi-prune         Remove older snapshots.
   pi-flatten       Flatten the current image to reset Docker layer depth.
-  pi-quick-fix     Remove an unused lifecycle lock file.
+  pi-quick-fix     Verify that the lifecycle lock is available.
 
 State:
   current image: $PI_AGENT_CURRENT_IMAGE
@@ -230,8 +230,8 @@ EOF
       cat <<EOF
 Usage: pi-quick-fix [-v|--verbose] [-h|--help]
 
-Remove the lifecycle lock file when no lifecycle operation is currently
-running. The lock file will be recreated automatically on the next operation.
+Verify that the lifecycle lock can be acquired. The lock file is persistent:
+an unlocked file is normal and must not be removed.
 
 Options:
   -v, --verbose  Print the lock path and progress to stderr.
@@ -292,6 +292,7 @@ _pi_agent_lock() {
   }
   [[ -e "$lock" ]] || : >"$lock"
   if ! zsystem flock -t "$timeout" -f _PI_AGENT_LOCK_FD "$lock"; then
+    _pi_agent_unlock
     print -u2 "pi-agent-docker: timed out after ${timeout}s waiting for lifecycle lock"
     print -u2 "pi-agent-docker: another lifecycle operation is still running; retry after it finishes"
     return 75
@@ -611,7 +612,7 @@ _pi_agent_commit_and_remove() {
   committed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! err_file="$(mktemp "${TMPDIR:-/tmp}/pi-agent-docker-commit.XXXXXX")"; then
     print -u2 "pi-agent-docker: failed to create temporary commit error file"
-    docker rm "$container" >/dev/null 2>&1 || true
+    print -u2 "pi-agent-docker: preserving container with uncommitted state: $container"
     return 1
   fi
   (( verbose )) && _pi_agent_info "committing container to current image: $container -> $PI_AGENT_CURRENT_IMAGE"
@@ -636,11 +637,20 @@ _pi_agent_commit_and_remove() {
   fi
   rm -f "$err_file"
 
-  # State is already committed.  Force removal avoids Docker's graceful-stop
-  # timeout for the `sleep infinity` container.
+  if (( commit_status != 0 )); then
+    print -u2 "pi-agent-docker: preserving container with uncommitted state: $container"
+    print -u2 "pi-agent-docker: retry after fixing the commit error; do not remove this container"
+    return $commit_status
+  fi
+
+  # State has been committed successfully. Force removal avoids Docker's
+  # graceful-stop timeout for the `sleep infinity` container.
   (( verbose )) && _pi_agent_info "removing shared container: $container"
-  docker rm -f "$container" >/dev/null 2>&1 || true
-  return $commit_status
+  if ! docker rm -f "$container" >/dev/null; then
+    print -u2 "pi-agent-docker: state was committed, but the shared container could not be removed: $container"
+    return 1
+  fi
+  return 0
 }
 
 _pi_agent_report_run_failure() {
@@ -841,7 +851,8 @@ _pi_agent_run() {
   fi
 
   if (( commit_status != 0 )); then
-    print -u2 "pi-agent-docker: docker commit failed for $container"
+    print -u2 "pi-agent-docker: could not finalize shared container: $container"
+    print -u2 "pi-agent-docker: inspect the preceding error; recoverable state was not intentionally removed"
     return $commit_status
   fi
 
@@ -1119,31 +1130,24 @@ pi-quick-fix() {
     _pi_agent_usage pi-quick-fix
     return 0
   fi
-  _pi_agent_config
-  _pi_agent_validate_state_dir || return $?
-
-  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
-  if [[ ! -e "$lock" ]]; then
-    (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock does not exist: $lock"
-    return 0
-  fi
+  _pi_agent_prepare_state_dir || return $?
 
   zmodload zsh/system || {
     print -u2 "pi-agent-docker: could not load zsh/system for lifecycle locking"
     return 1
   }
 
+  local lock="$PI_AGENT_STATE_DIR/lifecycle.lock"
+  [[ -e "$lock" ]] || : >"$lock"
   local _PI_AGENT_LOCK_FD
   if ! zsystem flock -t 0 -f _PI_AGENT_LOCK_FD "$lock"; then
-    print -u2 "pi-agent-docker: lifecycle operation is still running; lock was not removed"
+    _pi_agent_unlock
+    print -u2 "pi-agent-docker: lifecycle operation is still running; lock is healthy but busy"
     print -u2 "pi-agent-docker: $lock"
     return 75
   fi
 
-  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "removing unused lifecycle lock: $lock"
-  rm -f -- "$lock"
-  local remove_status=$?
-  zsystem flock -u "$_PI_AGENT_LOCK_FD" 2>/dev/null || true
-  unset _PI_AGENT_LOCK_FD
-  return $remove_status
+  (( _PI_AGENT_VERBOSE )) && _pi_agent_info "lifecycle lock is healthy and available: $lock"
+  _pi_agent_unlock
+  return 0
 }

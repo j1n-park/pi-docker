@@ -177,12 +177,15 @@ Flatten the current image manually:
 pi-flatten
 ```
 
-Remove an unused lifecycle lock after confirming no Pi lifecycle operation is
-running:
+Verify that the lifecycle lock is available:
 
 ```sh
-pi-quick-fix
+pi-quick-fix --verbose
 ```
+
+The `lifecycle.lock` file is intentionally persistent. `flock` releases the
+kernel lock when its file descriptor closes; deleting the file can split
+concurrent processes across different inodes and must not be used to unlock it.
 
 By default, `PI_AGENT_AUTO_PRUNE=1` keeps the newest
 `PI_AGENT_SNAPSHOT_KEEP=10` snapshots after the shared container is committed.
@@ -247,6 +250,10 @@ Linux:
 docker rm pi-agent-active-linux
 ```
 
+If committing the final session fails, the wrapper leaves the shared container
+in place so its container-local changes can be recovered or the commit retried.
+Do not remove a container reported as containing uncommitted state.
+
 ## Environment
 
 Defaults:
@@ -260,7 +267,7 @@ PI_AGENT_CURRENT_IMAGE="pi-agent-sandbox:current"
 PI_AGENT_ACTIVE_CONTAINER="pi-agent-active"
 PI_AGENT_WORKSPACE_ROOT="$HOME/workspace"
 PI_AGENT_STATE_DIR="$PI_AGENT_DOCKER_DIR/.state/$PI_AGENT_IMAGE_REPO"
-PI_AGENT_LOCK_TIMEOUT="30"
+PI_AGENT_LOCK_TIMEOUT="5"
 PI_AGENT_SNAPSHOT_KEEP="10"
 PI_AGENT_AUTO_PRUNE="1"
 PI_AGENT_FLATTEN_LAYER_THRESHOLD="100"
