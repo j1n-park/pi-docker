@@ -94,6 +94,49 @@ test_quick_fix_keeps_lock_file() {
   rm -rf "$temp_dir"
 }
 
+test_flatten_returns_cleanly_and_releases_lock() {
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  local PI_AGENT_STATE_DIR="$temp_dir/state"
+  local PI_AGENT_ACTIVE_CONTAINER="test-active"
+  local PI_AGENT_BASE_IMAGE="test:base"
+  local PI_AGENT_CURRENT_IMAGE="test:current"
+
+  set +e
+  (
+    docker() {
+      case "$1 $2" in
+        "image inspect")
+          return 0
+          ;;
+        "container inspect")
+          return 1
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+    }
+
+    _pi_agent_flatten_current_image() {
+      return 0
+    }
+
+    pi-flatten
+    pi-flatten
+  ) >/dev/null 2>"$temp_dir/error"
+  local flatten_status=$?
+  set -e
+
+  assert_eq 0 "$flatten_status" \
+    "flatten must return successfully and release its lifecycle lock"
+  (( tests_run += 1 ))
+  ! grep -q 'read-only variable: status' "$temp_dir/error" ||
+    fail "flatten must not assign zsh's read-only status parameter"
+
+  rm -rf "$temp_dir"
+}
+
 test_quick_fix_saves_and_stops_idle_container() {
   local temp_dir
   temp_dir="$(mktemp -d)"
@@ -308,6 +351,7 @@ test_quick_fix_commits_before_removing_orphan_with_busy_lock() {
 test_commit_failure_preserves_container
 test_commit_success_removes_container
 test_quick_fix_keeps_lock_file
+test_flatten_returns_cleanly_and_releases_lock
 test_quick_fix_saves_and_stops_idle_container
 test_quick_fix_recovers_interrupted_session
 test_quick_fix_refuses_active_session

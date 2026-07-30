@@ -513,6 +513,8 @@ _pi_agent_create_snapshot() {
 
 _pi_agent_docker_env_args() {
   local name
+  print -r -- "--env"
+  print -r -- "COLORTERM=${COLORTERM:-truecolor}"
   for name in "${_PI_AGENT_CLEARED_ENV[@]}"; do
     print -r -- "--env"
     print -r -- "$name="
@@ -754,6 +756,7 @@ _pi_agent_exec_session() {
     "${tty_args[@]}" \
     --workdir "$workspace" \
     --env "TERM=${TERM:-xterm-256color}" \
+    --env "COLORTERM=${COLORTERM:-truecolor}" \
     --env "PI_AGENT_SESSION_ID=$session_id" \
     "$PI_AGENT_ACTIVE_CONTAINER" \
     /bin/bash -lc '
@@ -996,7 +999,7 @@ pi-rollback() {
   local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
-  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_refuse_while_active || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
 
   local snapshot="${_PI_AGENT_ARGS[1]}"
   if [[ -z "$snapshot" ]]; then
@@ -1017,12 +1020,12 @@ pi-rollback() {
 
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rolling back current image to snapshot: $snapshot"
   docker tag "$snapshot" "$PI_AGENT_CURRENT_IMAGE"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  if (( status == 0 )); then
+  if (( operation_status == 0 )); then
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image now points to: $snapshot"
   fi
-  return $status
+  return $operation_status
 }
 
 pi-reset-system() {
@@ -1037,16 +1040,16 @@ pi-reset-system() {
   local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
-  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
-  _pi_agent_ensure_base_image "$_PI_AGENT_VERBOSE" || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_refuse_while_active || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
+  _pi_agent_ensure_base_image "$_PI_AGENT_VERBOSE" || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "resetting current image to base: $PI_AGENT_BASE_IMAGE -> $PI_AGENT_CURRENT_IMAGE"
   docker tag "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_CURRENT_IMAGE"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  if (( status == 0 )); then
+  if (( operation_status == 0 )); then
     (( _PI_AGENT_VERBOSE )) && _pi_agent_info "current image reset to base"
   fi
-  return $status
+  return $operation_status
 }
 
 pi-reset-all() {
@@ -1061,7 +1064,7 @@ pi-reset-all() {
   local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
-  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_refuse_while_active || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
 
   local -a images
   local snapshot_pattern
@@ -1084,9 +1087,9 @@ pi-reset-all() {
     done
   fi
   docker rmi "${images[@]}"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  return $status
+  return $operation_status
 }
 
 pi-rebuild-base() {
@@ -1109,9 +1112,9 @@ pi-rebuild-base() {
   trap '_pi_agent_unlock; return 130' HUP INT TERM
   (( _PI_AGENT_VERBOSE )) && _pi_agent_info "rebuilding base image: $PI_AGENT_BASE_IMAGE from $PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE"
   docker build -f "$PI_AGENT_DOCKER_DIR/$PI_AGENT_DOCKERFILE" -t "$PI_AGENT_BASE_IMAGE" "$PI_AGENT_DOCKER_DIR"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  return $status
+  return $operation_status
 }
 
 pi-prune() {
@@ -1126,11 +1129,11 @@ pi-prune() {
   local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
-  _pi_agent_refuse_while_active || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_refuse_while_active || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
   _pi_agent_prune_snapshots "${_PI_AGENT_ARGS[1]:-$PI_AGENT_SNAPSHOT_KEEP}" "$_PI_AGENT_VERBOSE"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  return $status
+  return $operation_status
 }
 
 pi-flatten() {
@@ -1145,16 +1148,16 @@ pi-flatten() {
   local _PI_AGENT_LOCK_FD
   _pi_agent_lock || return $?
   trap '_pi_agent_unlock; return 130' HUP INT TERM
-  _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || { local status=$?; _pi_agent_unlock; return $status; }
+  _pi_agent_ensure_current_image "$_PI_AGENT_VERBOSE" || { local operation_status=$?; _pi_agent_unlock; return $operation_status; }
   if docker container inspect "$PI_AGENT_ACTIVE_CONTAINER" >/dev/null 2>&1; then
     _pi_agent_report_run_failure "$PI_AGENT_ACTIVE_CONTAINER" 75
     _pi_agent_unlock
     return 75
   fi
   _pi_agent_flatten_current_image "$_PI_AGENT_VERBOSE"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  return $status
+  return $operation_status
 }
 
 pi-quick-fix() {

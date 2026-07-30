@@ -124,7 +124,7 @@ pi-rebuild-base() {
     --build-arg "AGENT_GID=$PI_AGENT_HOST_GID" \
     -t "$PI_AGENT_BASE_IMAGE" \
     "$PI_AGENT_DOCKER_DIR"
-  local status=$?
+  local operation_status=$?
   _pi_agent_unlock
-  return $status
+  return $operation_status
 }
